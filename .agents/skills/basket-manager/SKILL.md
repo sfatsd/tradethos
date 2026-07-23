@@ -23,6 +23,13 @@ Trigger this skill when the user mentions:
 - Recording a transaction in a basket
 - "My baskets" or "my indices"
 
+## General Rules & Standards
+
+- **Formatting**: Present monetary values with proper formatting (e.g., `$1,234.56`). Present percentages to two decimal places (e.g., `12.34%`).
+- **Stock Data**: Always include the symbol, current price, and relevant context (e.g., day change) when presenting basket stock metrics.
+- **User Confirmation**: Confirm before deleting a basket or overwriting existing basket files.
+- **Cross-Skill Offers**: Frame suggestions to research or trade basket holdings as optional offers, never automatic actions.
+
 ## Basket Storage
 
 Baskets are stored as JSON files in the `baskets/` directory within this skill:

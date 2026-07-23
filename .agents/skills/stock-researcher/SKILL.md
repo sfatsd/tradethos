@@ -22,6 +22,13 @@ Trigger this skill when the user mentions:
 - "Tell me about [company]" in an investment context
 - Industry or sector analysis
 
+## General Rules & Standards
+
+- **Formatting**: Present monetary values with proper formatting (e.g., `$1,234.56`). Present percentages to two decimal places (e.g., `12.34%`).
+- **Stock Context**: When presenting stock research, always include the symbol, current price, and relevant day change context.
+- **Research-First Approach**: When a user expresses interest in buying a stock they haven't analyzed, perform fundamental & technical research before offering to trade.
+- **Cross-Skill Offers**: Frame cross-skill suggestions (e.g., "Would you like to add this stock to a basket or review an order?") as offers, never automatic actions.
+
 ## Available Data Sources (Robinhood MCP)
 
 | Tool | Data Provided |

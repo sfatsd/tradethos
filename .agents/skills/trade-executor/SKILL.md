@@ -24,6 +24,14 @@ Trigger this skill when the user mentions:
 - Executing basket-aligned trades
 - Dollar-cost averaging
 
+## General Rules & Safety Standards
+
+- **State-Modifying Confirmation**: All operations that modify state (place order, cancel order) require **explicit user confirmation** before execution.
+- **Formatting**: Present monetary values with proper formatting (e.g., `$1,234.56`). Present percentages to two decimal places (e.g., `12.34%`).
+- **Stock Context**: Always include symbol, current price, and day change context when presenting stock quotes.
+- **Account Selection**: Never auto-default `account_number` from `get_accounts` — always present available accounts and ask the user to choose or confirm.
+- **Research-First**: If the user hasn't researched a stock prior to wanting to buy, suggest running stock research first before placing orders.
+
 ## Safety Rails — CRITICAL
 
 ### Review-Before-Place (Default)

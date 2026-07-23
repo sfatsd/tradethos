@@ -24,6 +24,13 @@ Trigger this skill when the user mentions:
 - Stock discovery or opportunity hunting
 - Upcoming earnings stocks
 
+## General Rules & Standards
+
+- **Formatting**: Present monetary values with proper formatting (e.g., `$1,234.56`). Present percentages to two decimal places (e.g., `12.34%`).
+- **Stock Context**: Always include symbol, current price, and relevant market context when presenting scanner results.
+- **User Confirmation**: Require explicit user confirmation before saving or modifying custom scans.
+- **Dynamic Spec Discovery**: Always call `get_scanner_filter_specs` first to discover valid filter enums and predicates.
+
 ## Available Data Sources (Robinhood MCP)
 
 | Tool | Purpose |

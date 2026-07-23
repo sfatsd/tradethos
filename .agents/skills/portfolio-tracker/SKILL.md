@@ -26,6 +26,13 @@ Trigger this skill when the user mentions:
 - "How's my basket doing?"
 - Basket performance or daily change
 
+## General Rules & Standards
+
+- **Formatting**: Present monetary values with proper formatting (e.g., `$1,234.56`). Present percentages to two decimal places (e.g., `12.34%`).
+- **Stock Context**: Always include symbol, current price, and day change context when presenting position breakdown or basket performance.
+- **Account Selection**: Never auto-default `account_number` from `get_accounts` — always present available accounts and ask the user to choose or confirm.
+- **Cross-Skill Offers**: Frame rebalancing trades or basket adjustments as optional suggestions/offers, never automatic actions.
+
 ## Available Data Sources (Robinhood MCP)
 
 | Tool | Purpose |
