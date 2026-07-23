@@ -1,6 +1,6 @@
 {
   "name": "tradethos",
-  "version": "0.1.0+codex.20260723205732",
+  "version": "0.1.0+codex.20260723210025",
   "description": "Build and manage custom stock baskets, indexes, and ETF-style portfolios using Robinhood market data.",
   "author": {
     "name": "Wei Shih"

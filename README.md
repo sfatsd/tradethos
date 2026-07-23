@@ -35,9 +35,6 @@ This package includes five specialized skills, published through the `tradethos`
 tradethos/
 ├── .agents/
 │   ├── AGENTS.md                                 # Project rules & safety guidelines
-│   └── plugins/
-│       ├── marketplace.json                       # sfatsd Codex marketplace manifest
-│       └── tradethos/                             # Installable Codex plugin
 │   ├── skills/
 │       ├── basket-manager/                       # Custom basket management skill
 │       │   ├── SKILL.md
@@ -54,6 +51,10 @@ tradethos/
 │       └── stock-screener/                       # Custom screener & scanner skill
 │           ├── SKILL.md
 │           └── references/filter_guide.md
+│   └── plugins/
+│       └── marketplace.json                       # sfatsd Codex marketplace manifest
+├── plugins/
+│   └── tradethos/                                 # Installable Codex plugin
 ├── data/
 │   └── baskets/                                  # Local storage for user basket JSON files (Gitignored)
 │       └── .gitkeep
