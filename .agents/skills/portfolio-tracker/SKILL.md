@@ -134,8 +134,8 @@ When the user has a basket and asks "am I on track?" or "do I need to rebalance?
 | GOOGL | 25.0% | 24.8% | -0.2% | On target ✅ |
 | META | 20.0% | 17.9% | -2.1% | Underweight — consider adding |
 
-5. Flag any holding with drift > 5% as needing attention
-6. If the user wants to rebalance, calculate the specific trades needed and suggest the **trade-executor** skill
+5. Flag any holding where `|drift| >= rebalance_threshold_pct` (from the basket JSON, defaulting to 5.0%) as requiring rebalancing attention.
+6. If the user wants to rebalance, calculate the specific trades needed and suggest the **trade-executor** skill.
 
 ### 6. Tax Lot Detail
 
@@ -145,13 +145,19 @@ When the user asks about cost basis or tax lots:
 2. Present each lot: Lot ID, Quantity, Purchase Price, Purchase Date, Current P&L
 3. Useful for tax-loss harvesting decisions or specific-lot selling
 
-## Drift Thresholds
+## Drift & Rebalancing Thresholds
+
+Rebalancing thresholds are resolved using a **hybrid 3-tier resolution hierarchy**:
+
+1. **Per-Basket Override**: `"rebalance_threshold_pct"` in `data/baskets/{slug}.json` (highest priority)
+2. **Global Config Override**: `"rebalancing.default_threshold_pct"` in `config.json` at root (if file exists)
+3. **Built-in Skill Fallback**: `5.0%` for rebalancing alerts, `2.0%` for on-target threshold (standalone default)
 
 | Drift Level | Range | Flag |
 |---|---|---|
-| On Target | ±2% | ✅ No action needed |
-| Minor Drift | ±2-5% | ⚠️ Monitor |
-| Significant Drift | > ±5% | 🔴 Consider rebalancing |
+| On Target | `\|drift\| <= 2.0%` (or `rebalancing.on_target_threshold_pct` in `config.json`) | ✅ No action needed |
+| Minor Drift | `on_target_threshold_pct < \|drift\| < rebalance_threshold_pct` | ⚠️ Monitor |
+| Rebalance Alert | `\|drift\| >= rebalance_threshold_pct` (fallback: `5.0%`) | 🔴 Consider rebalancing |
 
 ## Tracking Unowned Basket Stocks
 

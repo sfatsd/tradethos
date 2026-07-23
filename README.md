@@ -54,6 +54,7 @@ tradethos/
 ├── data/
 │   └── baskets/                                  # Local storage for user basket JSON files (Gitignored)
 │       └── .gitkeep
+├── config.json                                   # Global configuration & default thresholds
 ├── .gitignore
 ├── LICENSE                                       # MIT License
 └── README.md

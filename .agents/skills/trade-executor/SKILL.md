@@ -31,6 +31,7 @@ Trigger this skill when the user mentions:
 - **Stock Context**: Always include symbol, current price, and day change context when presenting stock quotes.
 - **Account Selection**: Never auto-default `account_number` from `get_accounts` — always present available accounts and ask the user to choose or confirm.
 - **Research-First**: If the user hasn't researched a stock prior to wanting to buy, suggest running stock research first before placing orders.
+- **Config Resolution Hierarchy**: Order review policies & defaults resolve in 3 tiers: User explicit prompt request → Root `config.json` (`trading.require_review_by_default`) → Built-in skill fallback (`require_review = true`).
 
 ## Safety Rails — CRITICAL
 

@@ -1,0 +1,20 @@
+{
+  "rebalancing": {
+    "default_threshold_pct": 5.0,
+    "on_target_threshold_pct": 2.0
+  },
+  "trading": {
+    "require_review_by_default": true,
+    "default_time_in_force": "gfd"
+  },
+  "research": {
+    "default_technical_interval": "day",
+    "financials_quarterly_limit": 8,
+    "financials_annual_limit": 4
+  },
+  "formatting": {
+    "currency": "USD",
+    "currency_symbol": "$",
+    "percentage_decimals": 2
+  }
+}

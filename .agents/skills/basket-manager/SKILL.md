@@ -50,6 +50,7 @@ Each basket file follows this structure:
   "created_at": "2026-07-22T15:00:00Z",
   "updated_at": "2026-07-22T22:30:00Z",
   "total_invested": 5000.00,
+  "rebalance_threshold_pct": 5.0,
   "holdings": [
     {
       "symbol": "WDC",
@@ -92,6 +93,7 @@ Each basket file follows this structure:
 | `created_at` | string | Yes | ISO 8601 timestamp of creation |
 | `updated_at` | string | Yes | ISO 8601 timestamp of last modification |
 | `total_invested` | number | Yes | Sum of all holdings' total_invested (dollars) |
+| `rebalance_threshold_pct` | number | No | Drift threshold % to trigger rebalance alerts (default: 5.0%) |
 | `holdings` | array | Yes | List of holdings |
 | `notes` | string | No | General basket notes |
 

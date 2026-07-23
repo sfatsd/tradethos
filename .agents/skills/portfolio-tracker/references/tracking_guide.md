@@ -71,7 +71,9 @@ Step 3: Calculate actual weights
 Step 4: Compare target vs actual
   For each holding:
   ├─ drift = actual_weight - target_weight
-  ├─ flag = "on target" if |drift| ≤ 2%, "minor" if 2-5%, "significant" if > 5%
+  ├─ threshold = basket rebalance_threshold_pct || config.json rebalancing.default_threshold_pct || 5.0%
+  ├─ on_target = config.json rebalancing.on_target_threshold_pct || 2.0%
+  ├─ flag = "on target" if |drift| ≤ on_target, "minor" if on_target < |drift| < threshold, "rebalance alert" if |drift| ≥ threshold
   └─ If position is null → actual_weight = 0%, drift = -target_weight
 
 Step 5: Calculate rebalancing trades (if requested)

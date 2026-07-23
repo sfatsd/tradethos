@@ -28,6 +28,7 @@ Trigger this skill when the user mentions:
 - **Stock Context**: When presenting stock research, always include the symbol, current price, and relevant day change context.
 - **Research-First Approach**: When a user expresses interest in buying a stock they haven't analyzed, perform fundamental & technical research before offering to trade.
 - **Cross-Skill Offers**: Frame cross-skill suggestions (e.g., "Would you like to add this stock to a basket or review an order?") as offers, never automatic actions.
+- **Config Resolution Hierarchy**: Default research parameters resolve in 3 tiers: User explicit query parameters → Root `config.json` (`research` section) → Built-in skill fallback (e.g., `interval = day`, `quarterly_limit = 8`).
 
 ## Available Data Sources (Robinhood MCP)
 
