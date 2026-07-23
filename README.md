@@ -65,7 +65,7 @@ tradethos/
 
 ### 1. Prerequisites
 - An AI Agent platform supporting Agent Skills (`SKILL.md` format, e.g., OpenClaw, Antigravity).
-- Robinhood MCP server installed and configured in your environment.
+- Robinhood MCP server installed and configured in your environment (see [Robinhood Agentic Trading Setup Guide](https://robinhood.com/us/en/support/articles/agentic-trading-overview/#ConnectyourAIagent)).
 
 ### 2. Installation
 Clone this repository into your project directory or link `.agents/` to your agent workspace:
