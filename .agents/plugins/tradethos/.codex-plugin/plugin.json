@@ -1,0 +1,24 @@
+{
+  "name": "tradethos",
+  "version": "0.1.0+codex.20260723204140",
+  "description": "Build and manage custom stock baskets, indexes, and ETF-style portfolios using Robinhood market data.",
+  "author": {
+    "name": "Wei Shih"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Tradethos",
+    "shortDescription": "Create your own stock baskets, indexes, and ETF-style portfolios.",
+    "longDescription": "Tradethos helps you build and manage custom stock baskets, indexes, and ETF-style portfolios. It uses Robinhood MCP market data for research, screening, portfolio tracking, and safety-focused equity-order review.",
+    "developerName": "Wei Shih",
+    "category": "Finance",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Build a semiconductor ETF-style basket.",
+      "Create an index of dividend-growth stocks.",
+      "Review my basket allocations and drift."
+    ]
+  }
+}
