@@ -29,6 +29,7 @@ Trigger this skill when the user mentions:
 - **Stock Data**: Always include the symbol, current price, and relevant context (e.g., day change) when presenting basket stock metrics.
 - **User Confirmation**: Confirm before deleting a basket or overwriting existing basket files.
 - **Cross-Skill Offers**: Frame suggestions to research or trade basket holdings as optional offers, never automatic actions.
+- **Basket-Level Transactions**: Only trades executed specifically for a custom basket (e.g., "invest $1,000 in my AI basket" or explicit basket rebalancing) are recorded in that basket's transaction history. General brokerage trades outside a basket are not automatically added, so stocks present in multiple baskets never conflict.
 
 ## Basket Storage
 

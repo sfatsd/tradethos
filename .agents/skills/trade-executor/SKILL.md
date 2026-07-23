@@ -167,12 +167,12 @@ When the user says "invest $X in my basket":
 3. For each holding: calculate dollar allocation → use dollar_amount market orders
 4. Present the plan, get confirmation, execute
 
-### Recording Transactions
-After an order fills for a stock that belongs to a basket:
-1. Check if the symbol exists in any basket in `data/baskets/`
-2. If yes, offer: *"[SYMBOL] is in your [Basket Name]. Record this transaction?"*
-3. If the user confirms, update the basket JSON: add transaction, recalculate avg_cost/shares/total_invested
-4. This is an **offer, not automatic** — per project rules
+### Recording Basket Transactions
+When a trade is executed **at the basket level** (e.g. "invest $500 in my AI Leaders basket" or "buy 10 shares of WDC for my Storage basket"):
+1. Load the target basket JSON file from `data/baskets/{slug}.json`.
+2. Record the transaction in that specific basket's transaction history.
+3. Recalculate that basket's `shares`, `avg_cost`, and `total_invested`.
+4. Trades placed outside of a basket execution (regular standalone stock buys/sells) are **not** recorded into basket files, keeping custom basket histories completely separate and free of conflict.
 
 ## Tax-Lot Selling (Advanced)
 
