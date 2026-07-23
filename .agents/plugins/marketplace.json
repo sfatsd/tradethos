@@ -1,7 +1,7 @@
 {
-  "name": "personal",
+  "name": "sfatsd",
   "interface": {
-    "displayName": "Personal"
+    "displayName": "sfatsd"
   },
   "plugins": [
     {
