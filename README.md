@@ -1,6 +1,6 @@
 # Tradethos 📈
 
-**Tradethos** is a portable, modular trading & investment skill package designed for AI agent platforms (such as OpenClaw, Antigravity, and MCP-compatible agent environments). It empowers AI agents to research equities, build and track custom stock baskets (user-defined indices), monitor performance, and safely execute brokerage operations via the Robinhood Model Context Protocol (MCP) server.
+**Tradethos** is a Codex plugin for building and tracking custom stock baskets, user-defined indexes, and ETF-style portfolios. It uses the Robinhood Model Context Protocol (MCP) for market data and brokerage workflows.
 
 ---
 
@@ -17,7 +17,7 @@
 
 ## 🧩 Included Agent Skills
 
-This package includes 5 specialized skills inside `.agents/skills/`:
+This package includes five specialized skills, published through the `tradethos` Codex plugin:
 
 | Skill | Description | Primary MCP Tools Used |
 |---|---|---|
@@ -35,7 +35,10 @@ This package includes 5 specialized skills inside `.agents/skills/`:
 tradethos/
 ├── .agents/
 │   ├── AGENTS.md                                 # Project rules & safety guidelines
-│   └── skills/
+│   └── plugins/
+│       ├── marketplace.json                       # sfatsd Codex marketplace manifest
+│       └── tradethos/                             # Installable Codex plugin
+│   ├── skills/
 │       ├── basket-manager/                       # Custom basket management skill
 │       │   ├── SKILL.md
 │       │   └── examples/sample_basket.json
@@ -65,17 +68,25 @@ tradethos/
 ## 🚀 Getting Started
 
 ### 1. Prerequisites
-- An AI Agent platform supporting Agent Skills (`SKILL.md` format, e.g., OpenClaw, Antigravity).
-- Robinhood MCP server installed and configured in your environment (see [Robinhood Agentic Trading Setup Guide](https://robinhood.com/us/en/support/articles/agentic-trading-overview/#ConnectyourAIagent)).
+- Codex with plugin support.
+- A Robinhood MCP server installed and configured in your environment. Tradethos does not include brokerage credentials or an MCP server.
 
-### 2. Installation
-Clone this repository into your project directory or link `.agents/` to your agent workspace:
+### 2. Install from the Codex marketplace
+
+```bash
+codex plugin marketplace add sfatsd/tradethos --ref main
+codex plugin add tradethos@sfatsd
+```
+
+Start a new Codex task after installation so its skills are loaded.
+
+### 3. Alternative: clone the source
 
 ```bash
 git clone https://github.com/sfatsd/tradethos.git
 ```
 
-### 3. Usage Examples
+### 4. Usage Examples
 
 Simply interact with your AI agent naturally:
 

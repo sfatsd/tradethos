@@ -12,6 +12,15 @@ Tradethos helps you create and manage your own custom stock baskets, indexes, an
 
 Tradethos depends on an available Robinhood MCP connection that provides the market-data and brokerage tools named in each `SKILL.md`. The plugin does not include credentials or a brokerage connection.
 
+## Install
+
+```bash
+codex plugin marketplace add sfatsd/tradethos --ref main
+codex plugin add tradethos@sfatsd
+```
+
+Start a new Codex task after installation so the plugin skills are loaded.
+
 ## Safety
 
 Order placement and cancellation require explicit confirmation. The trade workflow reviews an order before it is placed unless the user explicitly requests the review bypass.
