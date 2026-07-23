@@ -1,0 +1,21 @@
+{
+  "name": "tradethos",
+  "displayName": "Tradethos",
+  "description": "Build and manage custom stock baskets, indexes, and ETF-style portfolios using Robinhood market data.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Wei Shih"
+  },
+  "homepage": "https://github.com/sfatsd/tradethos",
+  "repository": "https://github.com/sfatsd/tradethos",
+  "license": "MIT",
+  "keywords": [
+    "investing",
+    "stock-baskets",
+    "custom-index",
+    "etf",
+    "portfolio-tracking",
+    "robinhood"
+  ],
+  "skills": "./skills/"
+}

@@ -1,0 +1,18 @@
+{
+  "name": "sfatsd",
+  "description": "Tradethos marketplace — custom stock baskets, portfolio tracking, and Robinhood workflows",
+  "owner": {
+    "name": "Wei Shih"
+  },
+  "plugins": [
+    {
+      "name": "tradethos",
+      "description": "Build and manage custom stock baskets, indexes, and ETF-style portfolios using Robinhood market data.",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "Wei Shih"
+      }
+    }
+  ]
+}

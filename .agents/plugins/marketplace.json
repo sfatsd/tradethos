@@ -8,7 +8,7 @@
       "name": "tradethos",
       "source": {
         "source": "local",
-        "path": "./plugins/tradethos"
+        "path": "./"
       },
       "policy": {
         "installation": "AVAILABLE",

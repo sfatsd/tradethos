@@ -1,10 +1,12 @@
 # Tradethos 📈
 
-**Tradethos** is a Codex plugin for building and tracking custom stock baskets, user-defined indexes, and ETF-style portfolios. It uses the Robinhood Model Context Protocol (MCP) for market data and brokerage workflows.
+**Tradethos** is a multi-platform agent plugin for building and tracking custom stock baskets, user-defined indexes, and ETF-style portfolios. It uses the Robinhood Model Context Protocol (MCP) for market data and brokerage workflows.
+
+Works with [Claude Code](#claude-code), [Cursor](#cursor), and [Codex](#codex).
 
 ---
 
-## 🌟 Key Features
+## Key Features
 
 - **Personal Stock Baskets**: Create and track thematic stock indices (e.g., *AI Infrastructure*, *Storage & Memory*, *Optical & Photonics*) with custom target allocations.
 - **Transaction & Position Tracking**: Track actual positions, share counts, average cost basis, realized/unrealized P&L, and daily/total changes.
@@ -15,9 +17,9 @@
 
 ---
 
-## 🧩 Included Agent Skills
+## Included Agent Skills
 
-This package includes five specialized skills, published through the `tradethos` Codex plugin:
+Tradethos ships five specialized skills in `skills/`:
 
 | Skill | Description | Primary MCP Tools Used |
 |---|---|---|
@@ -29,65 +31,138 @@ This package includes five specialized skills, published through the `tradethos`
 
 ---
 
-## 📁 Repository Structure
+## Repository Structure
+
+Following the [superpowers](https://github.com/obra/superpowers) plugin layout — skills live at the repo root and each agent platform reads them via its own plugin manifest:
 
 ```
 tradethos/
 ├── .agents/
-│   ├── AGENTS.md                                 # Project rules & safety guidelines
-│   ├── skills/
-│       ├── basket-manager/                       # Custom basket management skill
-│       │   ├── SKILL.md
-│       │   └── examples/sample_basket.json
-│       ├── stock-researcher/                     # Stock analysis & research skill
-│       │   ├── SKILL.md
-│       │   └── references/research_workflow.md
-│       ├── trade-executor/                       # Order placement & safety skill
-│       │   ├── SKILL.md
-│       │   └── references/order_rules.md
-│       ├── portfolio-tracker/                    # Position & P&L tracking skill
-│       │   ├── SKILL.md
-│       │   └── references/tracking_guide.md
-│       └── stock-screener/                       # Custom screener & scanner skill
-│           ├── SKILL.md
-│           └── references/filter_guide.md
 │   └── plugins/
-│       └── marketplace.json                       # sfatsd Codex marketplace manifest
-├── plugins/
-│   └── tradethos/                                 # Installable Codex plugin
+│       └── marketplace.json          # Codex marketplace manifest
+├── .claude-plugin/
+│   ├── plugin.json                   # Claude Code plugin manifest
+│   └── marketplace.json              # Claude marketplace manifest
+├── .cursor-plugin/
+│   └── plugin.json                   # Cursor plugin manifest
+├── .codex-plugin/
+│   └── plugin.json                   # Codex plugin manifest
+├── skills/                           # Single source of truth for all skills
+│   ├── basket-manager/
+│   │   ├── SKILL.md
+│   │   └── examples/sample_basket.json
+│   ├── stock-researcher/
+│   │   ├── SKILL.md
+│   │   └── references/research_workflow.md
+│   ├── trade-executor/
+│   │   ├── SKILL.md
+│   │   └── references/order_rules.md
+│   ├── portfolio-tracker/
+│   │   ├── SKILL.md
+│   │   └── references/tracking_guide.md
+│   └── stock-screener/
+│       ├── SKILL.md
+│       └── references/filter_guide.md
 ├── data/
-│   └── baskets/                                  # Local storage for user basket JSON files (Gitignored)
-│       └── .gitkeep
-├── config.json                                   # Global configuration & default thresholds
-├── .gitignore
-├── LICENSE                                       # MIT License
+│   └── baskets/                      # Local basket JSON files (gitignored)
+├── config.json                       # Shared defaults and thresholds
+├── AGENTS.md                         # Project rules & safety guidelines
+├── LICENSE
 └── README.md
 ```
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
-### 1. Prerequisites
-- Codex with plugin support.
+### Prerequisites
+
 - A Robinhood MCP server installed and configured in your environment. Tradethos does not include brokerage credentials or an MCP server.
 
-### 2. Install from the Codex marketplace
+### Installation status
+
+Tradethos is **not published** to the Cursor, Claude, or Codex official plugin marketplaces yet. Users can still install it today from the public GitHub repo (Codex and Claude Code) or via a local install (Cursor).
+
+| Platform | Works today without publishing? | How |
+|---|---|---|
+| **Codex** | Yes | Register this GitHub repo as a marketplace source |
+| **Claude Code** | Yes | Register this GitHub repo as a marketplace source |
+| **Cursor** | Local install only | Symlink the cloned repo into `~/.cursor/plugins/local/` |
+
+After Tradethos is published, one-click marketplace installs (`/add-plugin tradethos`, etc.) will work too.
+
+### Codex
+
+Register the GitHub repo as a marketplace, then install the plugin:
 
 ```bash
 codex plugin marketplace add sfatsd/tradethos --ref main
 codex plugin add tradethos@sfatsd
 ```
 
+For local development from a checkout:
+
+```bash
+git clone https://github.com/sfatsd/tradethos.git
+cd tradethos
+codex plugin marketplace add .
+codex plugin add tradethos@sfatsd
+```
+
 Start a new Codex task after installation so its skills are loaded.
 
-### 3. Alternative: clone the source
+### Claude Code
+
+In a Claude Code session, register the GitHub repo and install:
+
+```bash
+/plugin marketplace add sfatsd/tradethos
+/plugin install tradethos@sfatsd
+/reload-plugins
+```
+
+For local development from a checkout:
+
+```bash
+git clone https://github.com/sfatsd/tradethos.git
+cd tradethos
+/plugin marketplace add .
+/plugin install tradethos@sfatsd
+/reload-plugins
+```
+
+If install fails with an SSH `Permission denied (publickey)` error, force Git to use HTTPS:
+
+```bash
+git config --global url."https://github.com/".insteadOf "git@github.com:"
+```
+
+### Cursor
+
+Cursor marketplace search and `/add-plugin tradethos` only work **after** the plugin is submitted and approved at [cursor.com/marketplace/publish](https://cursor.com/marketplace/publish).
+
+Until then, install from a local clone:
+
+```bash
+git clone https://github.com/sfatsd/tradethos.git
+ln -s "$(pwd)/tradethos" ~/.cursor/plugins/local/tradethos
+```
+
+Restart Cursor. The plugin loads from `.cursor-plugin/plugin.json` and the skills in `skills/`.
+
+To remove the local install:
+
+```bash
+rm ~/.cursor/plugins/local/tradethos
+```
+
+### Clone the source
 
 ```bash
 git clone https://github.com/sfatsd/tradethos.git
 ```
 
-### 4. Usage Examples
+### Usage Examples
 
 Simply interact with your AI agent naturally:
 
@@ -99,14 +174,16 @@ Simply interact with your AI agent naturally:
 
 ---
 
-## 🛡️ Safety & Guardrails
+## Safety & Guardrails
 
 - **Explicit User Confirmation**: All order execution (`place_equity_order`), cancellations, and watchlist modifications require explicit user approval.
 - **Simulated Order Reviews**: Orders are automatically run through `review_equity_order` to display estimated cost, purchasing power, and warnings before placement.
 - **Idempotency**: Orders generate unique client UUIDs (`ref_id`) to prevent accidental duplicate orders on transport retries.
 
+See [AGENTS.md](AGENTS.md) for the full project rules.
+
 ---
 
-## 📄 License
+## License
 
 This project is licensed under the [MIT License](LICENSE) - © 2026 Wei Yuan Shih.
