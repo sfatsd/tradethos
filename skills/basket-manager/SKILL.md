@@ -217,6 +217,47 @@ position becomes null (reset — ready for a new position)
 3. If positions exist, compare performance metrics
 4. Use `get_equity_quotes` to show current prices for all symbols
 
+## Utility Scripts
+
+Reusable scripts in `skills/basket-manager/scripts/` packaged with this skill. Use these instead of writing ad-hoc Python code for basket operations. All scripts use Python stdlib only (no pip dependencies).
+
+### `skills/basket-manager/scripts/list_symbols.py` — Extract symbols from baskets
+```bash
+python3 skills/basket-manager/scripts/list_symbols.py                                    # All baskets, table
+python3 skills/basket-manager/scripts/list_symbols.py --basket storage-and-memory-index  # Single basket
+python3 skills/basket-manager/scripts/list_symbols.py --format json                      # Structured JSON output
+```
+
+### `skills/basket-manager/scripts/basket_summary.py` — Quick overview of all baskets
+```bash
+python3 skills/basket-manager/scripts/basket_summary.py                # Table with name, holdings, invested, weights
+python3 skills/basket-manager/scripts/basket_summary.py --format json  # JSON output
+```
+
+### `skills/basket-manager/scripts/calc_performance.py` — Calculate P&L with live prices
+Prices are passed as a `--prices` JSON argument. The agent fetches prices via Robinhood MCP, then passes them in.
+```bash
+python3 skills/basket-manager/scripts/calc_performance.py --basket storage-and-memory-index \
+  --prices '{"WDC":560.00,"STX":920.00,"MU":985.19,"SNDK":1612.08,"MRVL":209.92,"LITE":832.18}'
+python3 skills/basket-manager/scripts/calc_performance.py --all --prices '{...}'           # All baskets
+python3 skills/basket-manager/scripts/calc_performance.py --basket <slug> --prices '{...}' --format table  # Human-readable
+```
+
+### `skills/basket-manager/scripts/calc_drift.py` — Weight drift analysis for rebalancing
+Reads drift thresholds from `config.json`. Flags holdings exceeding the threshold.
+```bash
+python3 skills/basket-manager/scripts/calc_drift.py --basket storage-and-memory-index \
+  --prices '{"WDC":560.00,"STX":920.00,"MU":985.19,"SNDK":1612.08,"MRVL":209.92,"LITE":832.18}'
+python3 skills/basket-manager/scripts/calc_drift.py --all --prices '{...}' --threshold 3.0  # Custom threshold
+python3 skills/basket-manager/scripts/calc_drift.py --basket <slug> --prices '{...}' --format table  # Human-readable
+```
+
+### Script Design Principles
+- **No network calls** — scripts are pure data processors; the agent provides prices
+- **JSON output by default** — structured for agent consumption; `--format table` for human display
+- **Consistent CLI** — all scripts support `--format`, `--basket`, and `--help`
+- **Zero dependencies** — Python stdlib only (`json`, `os`, `argparse`, `pathlib`)
+
 ## Cross-Skill Integration
 
 - After creating a basket, suggest using the **trade-executor** skill to buy the holdings

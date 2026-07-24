@@ -1,3 +1,7 @@
 # Custom basket data files (personal investment data)
 data/baskets/*.json
 !data/baskets/.gitkeep
+
+# Python cache
+__pycache__/
+*.pyc
