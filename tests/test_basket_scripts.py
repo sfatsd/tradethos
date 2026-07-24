@@ -5,9 +5,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-# Add project root and scripts directory to sys.path
+# Add project root and basket-manager scripts directory to sys.path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-SCRIPTS_DIR = PROJECT_ROOT / "scripts"
+SCRIPTS_DIR = PROJECT_ROOT / "skills" / "basket-manager" / "scripts"
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(SCRIPTS_DIR))
 

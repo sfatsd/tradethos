@@ -2,8 +2,8 @@
 """Quick overview of all baskets: name, holdings count, invested amount, weight status.
 
 Usage:
-    python3 scripts/basket_summary.py                # Table format
-    python3 scripts/basket_summary.py --format json   # JSON output
+    python3 skills/basket-manager/scripts/basket_summary.py                # Table format
+    python3 skills/basket-manager/scripts/basket_summary.py --format json   # JSON output
 """
 
 import argparse
@@ -11,7 +11,19 @@ import json
 import sys
 from pathlib import Path
 
-BASKETS_DIR = Path(__file__).resolve().parent.parent / "data" / "baskets"
+
+def find_baskets_dir() -> Path:
+    """Dynamically locate the data/baskets directory by traversing upwards."""
+    curr = Path(__file__).resolve().parent
+    while curr != curr.parent:
+        target = curr / "data" / "baskets"
+        if target.exists():
+            return target
+        curr = curr.parent
+    return Path(__file__).resolve().parents[3] / "data" / "baskets"
+
+
+BASKETS_DIR = find_baskets_dir()
 
 
 def load_basket(filepath: Path) -> dict:

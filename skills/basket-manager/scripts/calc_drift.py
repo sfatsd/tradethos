@@ -5,10 +5,10 @@ Compares actual weights (based on current market value) to target weights
 and flags holdings that exceed the configured drift threshold.
 
 Usage:
-    python3 scripts/calc_drift.py --basket storage-and-memory-index \
+    python3 skills/basket-manager/scripts/calc_drift.py --basket storage-and-memory-index \
       --prices '{"WDC":560.00,"STX":920.00,"MU":985.19,"SNDK":1612.08,"MRVL":209.92,"LITE":832.18}'
 
-    python3 scripts/calc_drift.py --all \
+    python3 skills/basket-manager/scripts/calc_drift.py --all \
       --prices '{"WDC":560.00,...}' --threshold 3.0
 """
 
@@ -17,10 +17,32 @@ import json
 import sys
 from pathlib import Path
 
-BASKETS_DIR = Path(__file__).resolve().parent.parent / "data" / "baskets"
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
 
-# Drift status thresholds from config or defaults
+def find_baskets_dir() -> Path:
+    """Dynamically locate the data/baskets directory by traversing upwards."""
+    curr = Path(__file__).resolve().parent
+    while curr != curr.parent:
+        target = curr / "data" / "baskets"
+        if target.exists():
+            return target
+        curr = curr.parent
+    return Path(__file__).resolve().parents[3] / "data" / "baskets"
+
+
+def find_config_path() -> Path:
+    """Dynamically locate config.json by traversing upwards."""
+    curr = Path(__file__).resolve().parent
+    while curr != curr.parent:
+        target = curr / "config.json"
+        if target.exists():
+            return target
+        curr = curr.parent
+    return Path(__file__).resolve().parents[3] / "config.json"
+
+
+BASKETS_DIR = find_baskets_dir()
+CONFIG_PATH = find_config_path()
+
 DEFAULT_REBALANCE_THRESHOLD = 5.0
 DEFAULT_ON_TARGET_THRESHOLD = 2.0
 

@@ -5,10 +5,10 @@ Prices are passed as a JSON object via --prices so the script stays a pure
 data processor with no external API dependencies.
 
 Usage:
-    python3 scripts/calc_performance.py --basket storage-and-memory-index \
+    python3 skills/basket-manager/scripts/calc_performance.py --basket storage-and-memory-index \
       --prices '{"WDC":560.00,"STX":920.00,"MU":985.19,"SNDK":1612.08,"MRVL":209.92,"LITE":832.18}'
 
-    python3 scripts/calc_performance.py --all \
+    python3 skills/basket-manager/scripts/calc_performance.py --all \
       --prices '{"WDC":560.00,"STX":920.00,...}'
 """
 
@@ -17,7 +17,19 @@ import json
 import sys
 from pathlib import Path
 
-BASKETS_DIR = Path(__file__).resolve().parent.parent / "data" / "baskets"
+
+def find_baskets_dir() -> Path:
+    """Dynamically locate the data/baskets directory by traversing upwards."""
+    curr = Path(__file__).resolve().parent
+    while curr != curr.parent:
+        target = curr / "data" / "baskets"
+        if target.exists():
+            return target
+        curr = curr.parent
+    return Path(__file__).resolve().parents[3] / "data" / "baskets"
+
+
+BASKETS_DIR = find_baskets_dir()
 
 
 def load_basket(filepath: Path) -> dict:

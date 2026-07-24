@@ -2,19 +2,29 @@
 """Extract unique stock symbols from basket JSON files.
 
 Usage:
-    python3 scripts/list_symbols.py                          # All baskets, table format
-    python3 scripts/list_symbols.py --basket storage-and-memory-index  # Single basket
-    python3 scripts/list_symbols.py --format json             # JSON output
-    python3 scripts/list_symbols.py --format csv              # Comma-separated symbols
+    python3 skills/basket-manager/scripts/list_symbols.py                          # All baskets, table format
+    python3 skills/basket-manager/scripts/list_symbols.py --basket storage-and-memory-index  # Single basket
+    python3 skills/basket-manager/scripts/list_symbols.py --format json             # JSON output
 """
 
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
-BASKETS_DIR = Path(__file__).resolve().parent.parent / "data" / "baskets"
+
+def find_baskets_dir() -> Path:
+    """Dynamically locate the data/baskets directory by traversing upwards."""
+    curr = Path(__file__).resolve().parent
+    while curr != curr.parent:
+        target = curr / "data" / "baskets"
+        if target.exists():
+            return target
+        curr = curr.parent
+    return Path(__file__).resolve().parents[3] / "data" / "baskets"
+
+
+BASKETS_DIR = find_baskets_dir()
 
 
 def load_basket(filepath: Path) -> dict:
