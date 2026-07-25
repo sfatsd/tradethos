@@ -9,11 +9,13 @@ Provides helper functions for:
 5. Converting Watchlist data into standard Basket dictionaries for performance/drift scripts.
 """
 
+import base64
 import datetime
 import json
 import re
 import time
 import uuid
+import zlib
 from typing import Any, Dict, List, Optional
 
 # Fixed namespace UUID for Tradethos basket order tagging
@@ -65,21 +67,20 @@ def encode_watchlist_metadata(
     description: str = "",
     snapshot: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """Encode basket metadata into ultra-compact Watchlist display_description string.
+    """Encode basket metadata into zlib-compressed Base64 display_description string.
 
-    Format:
-      {"s":"slug","t":1721861640,"th":5,"w":{"WDC":[30,15.0,55.0],"STX":[30,10.0,92.0]}}
-      where symbol mapping value is [target_weight_pct, shares, avg_cost].
+    Uses zlib compression + Base64 encoding ('Z64:') to pack up to 30+ symbols
+    into Robinhood's 256-character display_description limit.
 
     Args:
         slug: Basket slug identifier.
         target_weights: Dict mapping symbol to target weight percentage (e.g. {'WDC': 30, 'STX': 30}).
         rebalance_threshold_pct: Rebalance threshold percentage.
-        description: Optional human-readable description (omitted if using ultra-compact JSON).
+        description: Optional human-readable description.
         snapshot: Optional snapshot dict with keys 'ts' (timestamp) and 'h' (holdings dict).
 
     Returns:
-        Ultra-compact JSON string (always under 255 chars for up to 12 symbols).
+        Compressed Base64 string prefixed with 'Z64:'.
     """
     ts_val = 0
     snap_h = {}
@@ -132,13 +133,16 @@ def encode_watchlist_metadata(
     if rebalance_threshold_pct != 5.0:
         metadata["th"] = round(rebalance_threshold_pct, 1)
 
-    return json.dumps(metadata, separators=(",", ":"))
+    json_str = json.dumps(metadata, separators=(",", ":"))
+    compressed = zlib.compress(json_str.encode("utf-8"))
+    b64_str = base64.b64encode(compressed).decode("utf-8")
+    return f"Z64:{b64_str}"
 
 
 def decode_watchlist_metadata(display_description: Optional[str]) -> Optional[Dict[str, Any]]:
-    """Extract and decode basket metadata JSON from Watchlist display_description.
+    """Extract and decode zlib-compressed basket metadata JSON from Watchlist display_description.
 
-    Handles both ultra-compact format {"s":...,"w":{...}} and legacy [BASKET_MODEL] format.
+    Handles 'Z64:' compressed Base64, raw JSON {"s":...}, and legacy [BASKET_MODEL] formats.
 
     Args:
         display_description: Watchlist description string from Robinhood.
@@ -150,7 +154,16 @@ def decode_watchlist_metadata(display_description: Optional[str]) -> Optional[Di
         return None
 
     desc_str = display_description.strip()
-    if desc_str.startswith("[BASKET_MODEL]"):
+    json_text = None
+
+    if desc_str.startswith("Z64:"):
+        try:
+            b64_payload = desc_str[4:]
+            compressed = base64.b64decode(b64_payload.encode("utf-8"))
+            json_text = zlib.decompress(compressed).decode("utf-8")
+        except Exception:
+            return None
+    elif desc_str.startswith("[BASKET_MODEL]"):
         match = re.search(r"\[BASKET_MODEL\]\s*(\{.*\})", desc_str)
         if not match:
             return None

@@ -24,19 +24,32 @@ from basket_utils import (
 class TestBasketUtils(unittest.TestCase):
     def test_encode_decode_watchlist_metadata(self):
         slug = "storage-leaders"
-        weights = {"WDC": 30.0, "STX": 30.0, "MU": 40.0}
+        target_weights = {"WDC": 30.0, "STX": 30.0, "MU": 40.0}
         threshold = 5.0
-        desc = "Storage & memory index"
+        snapshot = {"ts": "2026-07-24T00:00:00Z", "h": {}}
 
-        encoded = encode_watchlist_metadata(slug, weights, threshold, desc)
-        self.assertTrue(encoded.startswith("{"))
-        self.assertTrue(encoded.endswith("}"))
+        encoded = encode_watchlist_metadata(slug, target_weights, threshold, snapshot=snapshot)
+        self.assertTrue(encoded.startswith("Z64:"))
 
         decoded = decode_watchlist_metadata(encoded)
         self.assertIsNotNone(decoded)
         self.assertEqual(decoded["slug"], slug)
-        self.assertEqual(decoded["weights"], weights)
+        self.assertEqual(decoded["weights"], target_weights)
         self.assertEqual(decoded["threshold"], threshold)
+
+    def test_large_basket_compression(self):
+        symbols = [f"SYM{i}" for i in range(30)]
+        target_weights = {sym: 3.33 for sym in symbols}
+        snap_h = {sym: [10.5, 100.25] for sym in symbols}
+        snapshot = {"ts": 1721861640, "h": snap_h}
+
+        encoded = encode_watchlist_metadata("large-30-symbol-basket", target_weights, 5.0, snapshot=snapshot)
+        self.assertTrue(encoded.startswith("Z64:"))
+        self.assertLessEqual(len(encoded), 256)
+
+        decoded = decode_watchlist_metadata(encoded)
+        self.assertIsNotNone(decoded)
+        self.assertEqual(len(decoded["weights"]), 30)
 
     def test_decode_invalid_metadata(self):
         self.assertIsNone(decode_watchlist_metadata(None))
