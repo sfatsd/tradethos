@@ -35,15 +35,16 @@ Trigger this skill when the user mentions:
 
 ## Available Data Sources (Robinhood MCP)
 
-| Tool | Purpose |
+| Tool / Helper | Purpose |
 |---|---|
 | `get_portfolio` | Account-level value breakdown (equity, options, crypto) and buying power |
-| `get_equity_positions` | Current holdings: symbol, quantity, average cost |
+| `get_equity_positions` | Current total account holdings: symbol, quantity, average cost |
 | `get_equity_quotes` | Real-time prices for P&L calculation (includes previous close for day change) |
+| `get_watchlists` | Fetch cloud-native Robinhood Watchlists containing basket target weights in `display_description` |
+| `get_equity_orders` | Order history used by `basket_utils.reconstruct_basket_positions` to attribute holdings/cost basis per basket |
 | `get_pnl_trade_history` | Per-trade realized P&L (chronological, paginated) |
 | `get_realized_pnl` | Aggregate realized P&L over time windows |
 | `get_equity_tax_lots` | Tax-lot level position detail (cost basis per lot) |
-| `get_equity_orders` | Recent order history |
 
 ## Core Workflows
 

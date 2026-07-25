@@ -70,7 +70,7 @@ Skip the review step ONLY when the user has **very explicitly** asked to bypass:
        ↓
 5. Confirm: Get explicit user confirmation
        ↓
-6. Execute: place_equity_order → with fresh UUID ref_id
+6. Execute: place_equity_order → with client-generated UUID ref_id. For basket trades, generate ref_id using basket_utils.py (e.g. uuid5 under TRADETHOS_NAMESPACE) to tag the order to the basket permanently in Robinhood's cloud database.
        ↓
 7. Verify: get_equity_orders → confirm order status
 ```

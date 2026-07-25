@@ -33,11 +33,15 @@ Trigger this skill when the user mentions:
 
 ## Basket Storage
 
-Baskets are stored as JSON files in the `baskets/` directory within this skill:
-- **Path**: `data/baskets/{slug}.json`
-- **Slug**: Derived from the basket name using lowercase kebab-case (e.g., "Storage & Memory Index" → `storage-and-memory-index.json`)
-- **Gitignored**: Basket data files are not committed (they contain personal investment data)
-- **No external database needed** — everything is file-based
+Baskets can be stored in two ways:
+1. **Cloud-Native Robinhood Watchlists (Recommended)**:
+   - Stored directly on Robinhood using `create_watchlist` / `get_watchlists`.
+   - **Watchlist Name**: `Basket: <Display Name>` (e.g. `Basket: Storage Leaders`).
+   - **Metadata Description**: Target weights and threshold encoded in `display_description` as `[BASKET_MODEL] {"slug":"...", "weights":{...}, "threshold":5.0}` using `basket_utils.py`.
+   - **Position Tracking**: Holdings, cost basis, and total invested amounts are reconstructed dynamically via `get_equity_orders` filtering order `ref_id` tags (zero local storage requirement).
+2. **Local JSON Files (Legacy/Fallback)**:
+   - Stored as JSON files in `data/baskets/{slug}.json`.
+   - Used if local files exist or when converting locally via `migrate_to_watchlists.py`.
 
 ## Basket JSON Schema
 
