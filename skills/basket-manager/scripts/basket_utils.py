@@ -2,11 +2,10 @@
 """Utility module for Tradethos Cloud-Native Basket Management.
 
 Provides helper functions for:
-1. Encoding/decoding basket metadata into ultra-compact Robinhood Watchlist descriptions.
-2. Generating deterministic UUID v5 ref_id keys for basket order idempotency.
-3. Reconstructing basket holdings & average cost from filled orders + baseline snapshots.
-4. Performing in-place baseline updates after trade fills so metadata size never grows.
-5. Converting Watchlist data into standard Basket dictionaries for performance/drift scripts.
+1. Encoding/decoding basket metadata into zlib-compressed Base64 Robinhood Watchlist descriptions.
+2. Reconstructing basket holdings & average cost from filled orders + baseline snapshots.
+3. Performing in-place baseline updates after trade fills so metadata size never grows.
+4. Converting Watchlist data into standard Basket dictionaries for performance/drift scripts.
 """
 
 import base64
@@ -14,32 +13,8 @@ import datetime
 import json
 import re
 import time
-import uuid
 import zlib
 from typing import Any, Dict, List, Optional
-
-# Fixed namespace UUID for Tradethos order placement idempotency
-TRADETHOS_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
-
-
-def generate_basket_order_ref_id(basket_slug: str, symbol: str, timestamp: str, order_idx: int = 0) -> str:
-    """Generate a deterministic UUID v5 ref_id for order placement idempotency.
-
-    Note:
-        ref_id is passed to place_equity_order to prevent duplicate executions on retries.
-        It is NOT returned in get_equity_orders read queries and cannot be used for history mapping.
-
-    Args:
-        basket_slug: Kebab-case identifier of the basket (e.g. 'storage-leaders').
-        symbol: Ticker symbol (e.g. 'WDC').
-        timestamp: ISO format or unique string timestamp of order creation.
-        order_idx: Sequential index if multiple orders are generated in a single batch.
-
-    Returns:
-        UUID string to pass as ref_id in place_equity_order.
-    """
-    name_str = f"tradethos:basket:{basket_slug}:symbol:{symbol}:ts:{timestamp}:idx:{order_idx}"
-    return str(uuid.uuid5(TRADETHOS_NAMESPACE, name_str))
 
 
 def encode_watchlist_metadata(

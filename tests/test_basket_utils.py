@@ -14,7 +14,6 @@ sys.path.insert(0, str(root_dir))
 from basket_utils import (
     decode_watchlist_metadata,
     encode_watchlist_metadata,
-    generate_basket_order_ref_id,
     reconstruct_basket_positions,
     update_basket_watchlist_baseline,
     watchlist_to_basket_dict,
@@ -56,17 +55,6 @@ class TestBasketUtils(unittest.TestCase):
         self.assertIsNone(decode_watchlist_metadata("Just a normal watchlist description"))
         self.assertIsNone(decode_watchlist_metadata("[BASKET_MODEL] invalid json"))
 
-    def test_generate_basket_order_ref_id(self):
-        ref_id1 = generate_basket_order_ref_id("storage-leaders", "WDC", "2026-07-24T12:00:00Z", 0)
-        ref_id2 = generate_basket_order_ref_id("storage-leaders", "WDC", "2026-07-24T12:00:00Z", 0)
-        ref_id_diff = generate_basket_order_ref_id("storage-leaders", "STX", "2026-07-24T12:00:00Z", 0)
-
-        # Deterministic check
-        self.assertEqual(ref_id1, ref_id2)
-        self.assertNotEqual(ref_id1, ref_id_diff)
-        # Valid UUID length (36 chars with hyphens)
-        self.assertEqual(len(ref_id1), 36)
-
     def test_reconstruct_basket_positions(self):
         orders = [
             {
@@ -75,7 +63,6 @@ class TestBasketUtils(unittest.TestCase):
                 "side": "buy",
                 "quantity": "10",
                 "average_price": "50.00",
-                "ref_id": generate_basket_order_ref_id("test", "WDC", "ts1"),
             },
             {
                 "symbol": "WDC",
@@ -83,7 +70,6 @@ class TestBasketUtils(unittest.TestCase):
                 "side": "buy",
                 "quantity": "10",
                 "average_price": "60.00",
-                "ref_id": generate_basket_order_ref_id("test", "WDC", "ts2"),
             },
             {
                 "symbol": "WDC",
@@ -91,7 +77,6 @@ class TestBasketUtils(unittest.TestCase):
                 "side": "sell",
                 "quantity": "5",
                 "average_price": "70.00",
-                "ref_id": generate_basket_order_ref_id("test", "WDC", "ts3"),
             },
             {
                 "symbol": "STX",
@@ -99,7 +84,6 @@ class TestBasketUtils(unittest.TestCase):
                 "side": "buy",
                 "quantity": "10",
                 "average_price": "100.00",
-                "ref_id": generate_basket_order_ref_id("test", "STX", "ts4"),
             },
         ]
 
