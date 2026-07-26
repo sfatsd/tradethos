@@ -170,6 +170,101 @@ def decode_watchlist_metadata(display_description: Optional[str]) -> Optional[Di
     return data
 
 
+def reconstruct_basket_positions(
+    orders: List[Dict[str, Any]],
+    basket_symbols: Optional[List[str]] = None,
+    snapshot: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Dict[str, float]]:
+    """Reconstruct net holdings and average cost basis from filled equity orders.
+
+    Optionally starts from a baseline snapshot and applies orders created after snapshot['ts'].
+
+    Args:
+        orders: List of equity order dicts returned by get_equity_orders.
+        basket_symbols: Restrict calculations to symbols in this basket.
+        snapshot: Dict with baseline snapshot: {'ts': '...', 'h': {'SYMBOL': {'shares': X, 'avg_cost': Y}}}
+
+    Returns:
+        Dict mapping symbol to holding info:
+        {
+          "SYMBOL": {
+            "shares": float,
+            "total_cost": float,
+            "avg_cost": float
+          }
+        }
+    """
+    holdings: Dict[str, Dict[str, float]] = {}
+
+    # Initialize from snapshot baseline if available
+    snapshot_ts = None
+    if snapshot:
+        snapshot_ts = snapshot.get("ts")
+        snap_holdings = snapshot.get("h", {})
+        for sym, detail in snap_holdings.items():
+            if not basket_symbols or sym in basket_symbols:
+                if isinstance(detail, dict):
+                    holdings[sym] = {
+                        "shares": float(detail.get("shares", 0.0)),
+                        "total_cost": float(detail.get("total_cost", 0.0)),
+                        "avg_cost": float(detail.get("avg_cost", 0.0)),
+                    }
+                elif isinstance(detail, (list, tuple)) and len(detail) >= 2:
+                    shares = float(detail[0])
+                    avg_cost = float(detail[1])
+                    holdings[sym] = {
+                        "shares": shares,
+                        "total_cost": shares * avg_cost,
+                        "avg_cost": avg_cost,
+                    }
+
+    for order in orders:
+        state = order.get("state")
+        if state != "filled":
+            continue
+
+        symbol = order.get("symbol")
+        if not symbol:
+            continue
+
+        if basket_symbols and symbol not in basket_symbols:
+            continue
+
+        # If a snapshot timestamp exists, skip orders created before or at snapshot timestamp
+        created_at = order.get("created_at")
+        if snapshot_ts and created_at and created_at <= snapshot_ts:
+            continue
+
+        try:
+            qty = float(order.get("quantity", order.get("cumulative_quantity", 0)))
+            price = float(order.get("average_price", order.get("price", 0)))
+        except (ValueError, TypeError):
+            continue
+
+        side = order.get("side", "").lower()
+
+        if symbol not in holdings:
+            holdings[symbol] = {"shares": 0.0, "total_cost": 0.0, "avg_cost": 0.0}
+
+        curr = holdings[symbol]
+        if side == "buy":
+            curr["shares"] += qty
+            curr["total_cost"] += qty * price
+        elif side == "sell":
+            if curr["shares"] > 0:
+                avg_cost = curr["total_cost"] / curr["shares"]
+                curr["shares"] = max(0.0, curr["shares"] - qty)
+                curr["total_cost"] = curr["shares"] * avg_cost
+
+        if curr["shares"] > 0:
+            curr["avg_cost"] = curr["total_cost"] / curr["shares"]
+        else:
+            curr["avg_cost"] = 0.0
+            curr["total_cost"] = 0.0
+
+    return holdings
+
+
 def update_basket_watchlist_baseline(
     display_description: str,
     symbol: str,
