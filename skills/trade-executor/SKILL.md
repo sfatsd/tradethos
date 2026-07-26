@@ -70,7 +70,7 @@ Skip the review step ONLY when the user has **very explicitly** asked to bypass:
        ↓
 5. Confirm: Get explicit user confirmation
        ↓
-6. Execute: place_equity_order → with client-generated UUID ref_id. For basket trades, generate ref_id using basket_utils.py (e.g. uuid5 under TRADETHOS_NAMESPACE) to tag the order to the basket permanently in Robinhood's cloud database.
+6. Execute: place_equity_order. For basket trades, after order fills, update the Watchlist baseline snapshot using update_basket_watchlist_baseline and update_watchlist.
        ↓
 7. Verify: get_equity_orders → confirm order status
 ```
@@ -153,7 +153,7 @@ Skip the review step ONLY when the user has **very explicitly** asked to bypass:
 When the user has custom baskets (from the basket-manager skill):
 
 ### Execute to Target Weights
-1. Load the basket JSON from `data/baskets/`
+1. Fetch the target Watchlist using `get_watchlists` and `watchlist_to_basket_dict`
 2. Use `get_portfolio` to get current buying power
 3. Use `get_equity_positions` to get current holdings
 4. Use `get_equity_quotes` for current prices
@@ -163,17 +163,16 @@ When the user has custom baskets (from the basket-manager skill):
 
 ### Dollar-Based Basket Buy
 When the user says "invest $X in my basket":
-1. Load the basket JSON
+1. Fetch the target Watchlist using `get_watchlists` and `watchlist_to_basket_dict`
 2. Divide $X according to target weights
 3. For each holding: calculate dollar allocation → use dollar_amount market orders
 4. Present the plan, get confirmation, execute
 
 ### Recording Basket Transactions
 When a trade is executed **at the basket level** (e.g. "invest $500 in my AI Leaders basket" or "buy 10 shares of WDC for my Storage basket"):
-1. Load the target basket JSON file from `data/baskets/{slug}.json`.
-2. Record the transaction in that specific basket's transaction history.
-3. Recalculate that basket's `shares`, `avg_cost`, and `total_invested`.
-4. Trades placed outside of a basket execution (regular standalone stock buys/sells) are **not** recorded into basket files, keeping custom basket histories completely separate and free of conflict.
+1. Fetch the target Watchlist using `get_watchlists`.
+2. Compute the updated baseline snapshot after fill using `update_basket_watchlist_baseline`.
+3. Update the Watchlist `display_description` on Robinhood using `update_watchlist`.
 
 ## Tax-Lot Selling (Advanced)
 

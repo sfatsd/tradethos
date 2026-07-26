@@ -28,7 +28,7 @@ Step 4: Present results
 
 ```
 Step 1: Load basket
-  └─ Read data/baskets/{name}.json
+  └─ Fetch Watchlist via get_watchlists and decode Z64 metadata via watchlist_to_basket_dict
 
 Step 2: Get current quotes
   └─ get_equity_quotes(symbols=[all holding symbols])
@@ -58,7 +58,7 @@ Step 5: Present results
 
 ```
 Step 1: Load basket
-  └─ Read data/baskets/{name}.json
+  └─ Fetch Watchlist via get_watchlists and decode Z64 metadata via watchlist_to_basket_dict
 
 Step 2: Get current quotes
   └─ get_equity_quotes(symbols=[all holding symbols])

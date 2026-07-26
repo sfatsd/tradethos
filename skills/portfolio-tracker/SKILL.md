@@ -96,7 +96,7 @@ When the user asks "how much have I made?" or "show my P&L":
 
 When the user asks "how's my basket doing?" or "show me my Storage basket":
 
-1. Load the basket JSON from `data/baskets/{name}.json`
+1. Fetch the target Watchlist using `get_watchlists` and decode metadata with `watchlist_to_basket_dict`
 2. Call `get_equity_quotes(symbols=[all holding symbols])` for current prices and previous close
 3. For each holding with a position (`position != null`), calculate:
    - **Current Value** = position.shares × current_price
@@ -121,7 +121,7 @@ When the user asks "how's my basket doing?" or "show me my Storage basket":
 
 When the user has a basket and asks "am I on track?" or "do I need to rebalance?":
 
-1. Load the basket JSON from `data/baskets/`
+1. Fetch the target Watchlist using `get_watchlists` and decode metadata with `watchlist_to_basket_dict`
 2. Call `get_equity_quotes(symbols=[...])` for current prices
 3. For each holding with a position, calculate actual weights:
    - total_basket_value = sum of (shares × current_price) for all positioned holdings
@@ -135,7 +135,7 @@ When the user has a basket and asks "am I on track?" or "do I need to rebalance?
 | GOOGL | 25.0% | 24.8% | -0.2% | On target ✅ |
 | META | 20.0% | 17.9% | -2.1% | Underweight — consider adding |
 
-5. Flag any holding where `|drift| >= rebalance_threshold_pct` (from the basket JSON, defaulting to 5.0%) as requiring rebalancing attention.
+5. Flag any holding where `|drift| >= rebalance_threshold_pct` (from the Watchlist metadata `th` field, defaulting to 5.0%) as requiring rebalancing attention.
 6. If the user wants to rebalance, calculate the specific trades needed and suggest the **trade-executor** skill.
 
 ### 6. Tax Lot Detail
@@ -150,7 +150,7 @@ When the user asks about cost basis or tax lots:
 
 Rebalancing thresholds are resolved using a **hybrid 3-tier resolution hierarchy**:
 
-1. **Per-Basket Override**: `"rebalance_threshold_pct"` in `data/baskets/{slug}.json` (highest priority)
+1. **Per-Basket Override**: `"rebalance_threshold_pct"` (`th`) in Watchlist description metadata (highest priority)
 2. **Global Config Override**: `"rebalancing.default_threshold_pct"` in `config.json` at root (if file exists)
 3. **Built-in Skill Fallback**: `5.0%` for rebalancing alerts, `2.0%` for on-target threshold (standalone default)
 
