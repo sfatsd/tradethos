@@ -18,12 +18,16 @@ import uuid
 import zlib
 from typing import Any, Dict, List, Optional
 
-# Fixed namespace UUID for Tradethos basket order tagging
+# Fixed namespace UUID for Tradethos order placement idempotency
 TRADETHOS_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 
 
 def generate_basket_order_ref_id(basket_slug: str, symbol: str, timestamp: str, order_idx: int = 0) -> str:
     """Generate a deterministic UUID v5 ref_id for order placement idempotency.
+
+    Note:
+        ref_id is passed to place_equity_order to prevent duplicate executions on retries.
+        It is NOT returned in get_equity_orders read queries and cannot be used for history mapping.
 
     Args:
         basket_slug: Kebab-case identifier of the basket (e.g. 'storage-leaders').
@@ -36,28 +40,6 @@ def generate_basket_order_ref_id(basket_slug: str, symbol: str, timestamp: str, 
     """
     name_str = f"tradethos:basket:{basket_slug}:symbol:{symbol}:ts:{timestamp}:idx:{order_idx}"
     return str(uuid.uuid5(TRADETHOS_NAMESPACE, name_str))
-
-
-def is_order_tagged_to_basket(order: Dict[str, Any], basket_symbols: List[str], basket_order_ids: Optional[List[str]] = None) -> bool:
-    """Check if an order belongs to a basket based on symbol match or order ID.
-
-    Args:
-        order: Order dict from get_equity_orders.
-        basket_symbols: List of symbols in the basket.
-        basket_order_ids: List of specific order UUIDs associated with the basket.
-
-    Returns:
-        True if the order matches the basket's symbols or order IDs.
-    """
-    if not order:
-        return False
-
-    order_id = order.get("id")
-    if basket_order_ids and order_id in basket_order_ids:
-        return True
-
-    symbol = order.get("symbol")
-    return bool(symbol and symbol in basket_symbols)
 
 
 def encode_watchlist_metadata(
