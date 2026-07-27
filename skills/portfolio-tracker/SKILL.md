@@ -98,20 +98,22 @@ When the user asks "how's my basket doing?" or "show me my Storage basket":
 
 1. Fetch the target Watchlist using `get_watchlists` and decode metadata with `watchlist_to_basket_dict`
 2. Call `get_equity_quotes(symbols=[all holding symbols])` for current prices and previous close
-3. For each holding with a position (`position != null`), calculate:
+3. **Consistency check**: Call `get_equity_positions` and compare actual Robinhood shares for basket symbols against the snapshot. If a symbol's actual shares differ significantly from the snapshot (e.g., snapshot says 0 shares but Robinhood shows holdings, or vice versa), warn the user that the basket snapshot may be stale.
+4. **If inconsistency detected**: Use `reconstruct_basket_positions(orders, basket_symbols, snapshot)` with the basket's snapshot and recent orders from `get_equity_orders` to rebuild accurate positions. Offer to update the Watchlist baseline with the corrected data.
+5. For each holding with a position (`position != null`), calculate:
    - **Current Value** = position.shares × current_price
    - **Day Change ($)** = position.shares × (current_price - previous_close)
    - **Day Change (%)** = (current_price - previous_close) / previous_close × 100
    - **Total P&L ($)** = current_value - position.total_invested
    - **Total P&L (%)** = total_pnl / position.total_invested × 100
-4. Present per-holding table:
+6. Present per-holding table:
 
 | Symbol | Target Wt | Shares | Avg Cost | Current | Value | Day Chg | Total P&L |
 |---|---|---|---|---|---|---|---|
 | WDC | 20% | 12.66 | $79.00 | $82.50 | $1,044.45 | +$15.19 (+1.87%) | +$44.45 (+4.44%) |
 | MU | 20% | — | — | $105.20 | — | — | No position |
 
-5. Show basket totals:
+7. Show basket totals:
    - **Total Invested**: Sum of all position.total_invested
    - **Current Value**: Sum of all (shares × current_price)
    - **Day Change**: Sum of all day changes

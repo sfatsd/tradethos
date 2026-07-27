@@ -9,8 +9,9 @@
 ## Custom Baskets
 - Custom baskets (user-defined indices) are stored cloud-natively as Robinhood Watchlists named `Basket: <Name>` (e.g., `Basket: Storage Leaders`).
 - Basket metadata (slug, target model weights, rebalance threshold, baseline holding snapshot) is encoded in the Watchlist `display_description` using `zlib` Base64 compression (`Z64:...`) to fit up to 30+ symbols under Robinhood's 256-character limit.
-- Holdings and cost basis are calculated from baseline snapshots + filled orders retrieved via `get_equity_orders`.
-- After trade fills, baseline snapshots are updated in-place via `update_watchlist` so metadata size never grows over time.
+- Holdings and cost basis are read from the baseline snapshot in `Z64:` metadata (primary source of truth).
+- After trade fills, baseline snapshots **must** be updated in-place via `update_basket_watchlist_baseline` + `update_watchlist`. Always verify the update by re-fetching and decoding the Watchlist.
+- If a snapshot update fails or positions look inconsistent, use `reconstruct_basket_positions(orders, basket_symbols, snapshot)` as a recovery mechanism to rebuild positions from `get_equity_orders`.
 
 ## Research-First Approach
 - When a user expresses interest in buying a stock they haven't researched yet, suggest running research first before proceeding to trade.

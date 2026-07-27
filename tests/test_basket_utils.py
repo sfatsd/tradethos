@@ -14,6 +14,7 @@ sys.path.insert(0, str(root_dir))
 from basket_utils import (
     decode_watchlist_metadata,
     encode_watchlist_metadata,
+    reconstruct_basket_positions,
     update_basket_watchlist_baseline,
     watchlist_to_basket_dict,
 )
@@ -54,6 +55,89 @@ class TestBasketUtils(unittest.TestCase):
         self.assertIsNone(decode_watchlist_metadata("Just a normal watchlist description"))
         self.assertIsNone(decode_watchlist_metadata("[BASKET_MODEL] invalid json"))
 
+    def test_reconstruct_basket_positions(self):
+        orders = [
+            {
+                "symbol": "WDC",
+                "state": "filled",
+                "side": "buy",
+                "quantity": "10",
+                "average_price": "50.00",
+            },
+            {
+                "symbol": "WDC",
+                "state": "filled",
+                "side": "buy",
+                "quantity": "10",
+                "average_price": "60.00",
+            },
+            {
+                "symbol": "WDC",
+                "state": "filled",
+                "side": "sell",
+                "quantity": "5",
+                "average_price": "70.00",
+            },
+            {
+                "symbol": "STX",
+                "state": "cancelled",
+                "side": "buy",
+                "quantity": "10",
+                "average_price": "100.00",
+            },
+        ]
+
+        holdings = reconstruct_basket_positions(orders, basket_symbols=["WDC", "STX"])
+
+        self.assertIn("WDC", holdings)
+        self.assertNotIn("STX", holdings)  # STX order was cancelled
+
+        wdc = holdings["WDC"]
+        # 10 shares @ 50 + 10 shares @ 60 = 20 shares total cost 1100 (avg 55).
+        # Sell 5 shares @ 70 -> Remaining 15 shares @ avg cost 55 = total cost 825.
+        self.assertEqual(wdc["shares"], 15.0)
+        self.assertEqual(wdc["avg_cost"], 55.0)
+        self.assertEqual(wdc["total_cost"], 825.0)
+
+    def test_reconstruct_with_snapshot(self):
+        snapshot = {
+            "ts": "2026-07-24T00:00:00Z",
+            "h": {
+                "WDC": [10.0, 50.0],  # 10 shares @ $50.00
+            },
+        }
+
+        orders = [
+            # Old order before snapshot timestamp -> should be skipped
+            {
+                "symbol": "WDC",
+                "state": "filled",
+                "side": "buy",
+                "quantity": "5",
+                "average_price": "40.00",
+                "created_at": "2026-07-23T12:00:00Z",
+            },
+            # New order after snapshot timestamp -> should be applied
+            {
+                "symbol": "WDC",
+                "state": "filled",
+                "side": "buy",
+                "quantity": "10",
+                "average_price": "60.00",
+                "created_at": "2026-07-24T12:00:00Z",
+            },
+        ]
+
+        holdings = reconstruct_basket_positions(orders, basket_symbols=["WDC"], snapshot=snapshot)
+
+        self.assertIn("WDC", holdings)
+        wdc = holdings["WDC"]
+        # Snapshot: 10 @ 50 = $500 total cost
+        # New buy: 10 @ 60 = $600 total cost
+        # Combined: 20 shares, $1100 total cost -> avg_cost = $55.00
+        self.assertEqual(wdc["shares"], 20.0)
+        self.assertEqual(wdc["avg_cost"], 55.0)
+        self.assertEqual(wdc["total_cost"], 1100.0)
 
     def test_watchlist_to_basket_dict(self):
         desc = encode_watchlist_metadata("storage-leaders", {"WDC": 50.0, "STX": 50.0}, rebalance_threshold_pct=5.0)
