@@ -175,14 +175,25 @@ def reconstruct_basket_positions(
     basket_symbols: Optional[List[str]] = None,
     snapshot: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Dict[str, float]]:
-    """Reconstruct net holdings and average cost basis from filled equity orders.
+    """Recovery tool: reconstruct holdings from order history when baseline snapshot is stale or missing.
 
-    Optionally starts from a baseline snapshot and applies orders created after snapshot['ts'].
+    This function is NOT the primary position source — the Z64 baseline snapshot is.
+    Use this only when:
+    - A baseline snapshot update failed after a trade fill
+    - Snapshot data appears inconsistent with actual Robinhood positions
+    - Manual reconciliation is needed
+
+    IMPORTANT: Always pass a snapshot to avoid double-counting for overlapping symbols.
+    Without a snapshot, all filled orders for matching symbols are counted regardless of
+    which basket they were intended for.
+
+    Starts from the baseline snapshot and applies only filled orders created after snapshot['ts'].
 
     Args:
         orders: List of equity order dicts returned by get_equity_orders.
         basket_symbols: Restrict calculations to symbols in this basket.
-        snapshot: Dict with baseline snapshot: {'ts': '...', 'h': {'SYMBOL': {'shares': X, 'avg_cost': Y}}}
+        snapshot: Dict with baseline snapshot: {'ts': '...', 'h': {'SYMBOL': [shares, avg_cost]}}
+                  STRONGLY RECOMMENDED to avoid overlap double-counting.
 
     Returns:
         Dict mapping symbol to holding info:

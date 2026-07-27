@@ -38,7 +38,8 @@ Baskets are stored cloud-natively as Robinhood Watchlists:
    - Stored directly on Robinhood using `create_watchlist`, `update_watchlist`, and `get_watchlists`.
    - **Watchlist Name**: `Basket: <Display Name>` (e.g. `Basket: Storage Leaders`).
    - **Metadata Description**: Target weights, threshold, and baseline snapshots encoded in `display_description` using `zlib` Base64 compression (`Z64:...`) via `basket_utils.py` (tripling capacity up to 30+ symbols under Robinhood's 256-character limit).
-   - **Position Tracking**: Holdings, cost basis, and total invested amounts are calculated from baseline snapshots stored in `Z64:` metadata + filled orders retrieved via `get_equity_orders`. Baseline snapshots are updated in-place after trade fills so metadata length never grows.
+   - **Position Tracking (Primary)**: Holdings, cost basis, and total invested amounts are read from the baseline snapshot stored in `Z64:` metadata. Baseline snapshots are updated in-place after trade fills via `update_basket_watchlist_baseline` so metadata length never grows.
+   - **Position Recovery (Fallback)**: If a baseline snapshot update fails or data appears inconsistent, `reconstruct_basket_positions(orders, basket_symbols, snapshot)` replays filled orders from `get_equity_orders` after the snapshot timestamp to rebuild accurate positions. Always pass the basket's snapshot to avoid double-counting stocks that appear in multiple baskets.
 
 ## Basket JSON Schema
 
