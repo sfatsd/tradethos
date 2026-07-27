@@ -1,0 +1,123 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.9 is the floor: the scripts use PEP 585 builtin generics in annotations.
+        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run tests
+        # Scripts are stdlib-only by design, so there is nothing to install.
+        run: python -m unittest discover -s tests -v
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate JSON manifests
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          paths = [
+              ".claude-plugin/plugin.json",
+              ".claude-plugin/marketplace.json",
+              ".codex-plugin/plugin.json",
+              ".cursor-plugin/plugin.json",
+              ".agents/plugins/marketplace.json",
+              "config.json",
+          ]
+
+          failed = False
+          for path in paths:
+              try:
+                  json.loads(pathlib.Path(path).read_text())
+              except (OSError, json.JSONDecodeError) as exc:
+                  print(f"::error file={path}::{exc}")
+                  failed = True
+              else:
+                  print(f"ok {path}")
+          sys.exit(1 if failed else 0)
+          PY
+
+      - name: Check plugin versions agree
+        run: |
+          python - <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          versions = {
+              path: json.loads(pathlib.Path(path).read_text())["version"]
+              for path in (
+                  ".claude-plugin/plugin.json",
+                  ".codex-plugin/plugin.json",
+                  ".cursor-plugin/plugin.json",
+              )
+          }
+          marketplace = json.loads(pathlib.Path(".claude-plugin/marketplace.json").read_text())
+          versions[".claude-plugin/marketplace.json"] = marketplace["plugins"][0]["version"]
+
+          unique = set(versions.values())
+          for path, version in versions.items():
+              print(f"{version}  {path}")
+          if len(unique) > 1:
+              print(f"::error::Plugin manifests disagree on version: {sorted(unique)}")
+              sys.exit(1)
+          PY
+
+  skills:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check every skill has frontmatter with name and description
+        run: |
+          python - <<'PY'
+          import pathlib
+          import sys
+
+          failed = False
+          skills = sorted(pathlib.Path("skills").glob("*/SKILL.md"))
+          if not skills:
+              print("::error::No SKILL.md files found under skills/")
+              sys.exit(1)
+
+          for skill in skills:
+              text = skill.read_text()
+              if not text.startswith("---"):
+                  print(f"::error file={skill}::missing YAML frontmatter")
+                  failed = True
+                  continue
+              frontmatter = text.split("---", 2)[1]
+              for key in ("name:", "description:"):
+                  if key not in frontmatter:
+                      print(f"::error file={skill}::frontmatter missing '{key}'")
+                      failed = True
+              expected = f"name: {skill.parent.name}"
+              if expected not in frontmatter:
+                  print(f"::error file={skill}::frontmatter name should match directory ({expected})")
+                  failed = True
+              print(f"ok {skill}")
+          sys.exit(1 if failed else 0)
+          PY

@@ -22,7 +22,11 @@ from pathlib import Path
 scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(scripts_dir))
 
-from basket_utils import watchlist_to_basket_dict
+from basket_utils import (
+    iter_watchlist_baskets,
+    parse_watchlists_json,
+    watchlist_to_basket_dict,
+)
 
 
 def find_baskets_dir() -> Path:
@@ -168,8 +172,9 @@ def main():
     group.add_argument("--watchlists-json", help="JSON array of watchlists returned by get_watchlists")
     parser.add_argument("--prices", required=True,
                         help="JSON object of symbol:price pairs")
-    parser.add_argument("--threshold", type=float, default=default_threshold,
-                        help=f"Drift threshold %% to flag (default: {default_threshold})")
+    parser.add_argument("--threshold", type=float, default=None,
+                        help="Drift threshold %% to flag — overrides per-basket metadata "
+                             f"(default: per-basket value, else {default_threshold})")
     parser.add_argument("--format", choices=["json", "table"], default="json",
                         help="Output format (default: json)")
     args = parser.parse_args()
@@ -182,30 +187,31 @@ def main():
 
     results = []
 
+    def resolve_threshold(basket: dict) -> float:
+        """An explicit --threshold outranks per-basket metadata, which outranks config."""
+        if args.threshold is not None:
+            return args.threshold
+        return basket.get("rebalance_threshold_pct", default_threshold)
+
     if args.watchlists_json:
         try:
-            wl_list = json.loads(args.watchlists_json)
-            if isinstance(wl_list, dict) and "watchlists" in wl_list:
-                wl_list = wl_list["watchlists"]
-            for wl in wl_list:
-                desc = wl.get("display_description", "")
-                if not desc or "{" not in desc:
-                    continue
-                name = wl.get("display_name", "Unknown")
-                b_dict = watchlist_to_basket_dict(name, desc)
-                basket_threshold = b_dict.get("rebalance_threshold_pct", args.threshold)
-                drift = calc_basket_drift(b_dict, prices, basket_threshold, default_on_target)
-                results.append(drift)
-        except json.JSONDecodeError as e:
+            wl_list = parse_watchlists_json(args.watchlists_json)
+        except (json.JSONDecodeError, ValueError) as e:
             print(f"Error parsing --watchlists-json: {e}", file=sys.stderr)
             sys.exit(1)
+
+        for name, desc, _metadata in iter_watchlist_baskets(wl_list):
+            b_dict = watchlist_to_basket_dict(name, desc)
+            results.append(
+                calc_basket_drift(b_dict, prices, resolve_threshold(b_dict), default_on_target)
+            )
     else:
         basket_files = get_basket_files(args.basket, args.all)
         for filepath in basket_files:
             data = load_basket(filepath)
-            basket_threshold = data.get("rebalance_threshold_pct", args.threshold)
-            drift = calc_basket_drift(data, prices, basket_threshold, default_on_target)
-            results.append(drift)
+            results.append(
+                calc_basket_drift(data, prices, resolve_threshold(data), default_on_target)
+            )
 
     if args.format == "json":
         output = results[0] if len(results) == 1 else {"baskets": results}

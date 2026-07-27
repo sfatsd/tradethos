@@ -16,7 +16,11 @@ from pathlib import Path
 scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(scripts_dir))
 
-from basket_utils import watchlist_to_basket_dict
+from basket_utils import (
+    iter_watchlist_baskets,
+    parse_watchlists_json,
+    watchlist_to_basket_dict,
+)
 
 
 def find_baskets_dir() -> Path:
@@ -63,27 +67,22 @@ def main():
 
     if args.watchlists_json:
         try:
-            wl_list = json.loads(args.watchlists_json)
-            if isinstance(wl_list, dict) and "watchlists" in wl_list:
-                wl_list = wl_list["watchlists"]
-            for wl in wl_list:
-                desc = wl.get("display_description", "")
-                if not desc or "{" not in desc:
-                    continue
-                name = wl.get("display_name", "Unknown")
-                b_dict = watchlist_to_basket_dict(name, desc)
-                slug = b_dict["slug"]
-                if args.basket and slug != args.basket:
-                    continue
-                symbols = [h["symbol"] for h in b_dict["holdings"]]
-                baskets_data[slug] = {
-                    "name": b_dict["name"],
-                    "symbols": symbols,
-                }
-                all_symbols.update(symbols)
-        except json.JSONDecodeError as e:
+            wl_list = parse_watchlists_json(args.watchlists_json)
+        except (json.JSONDecodeError, ValueError) as e:
             print(f"Error parsing --watchlists-json: {e}", file=sys.stderr)
             sys.exit(1)
+
+        for name, desc, _metadata in iter_watchlist_baskets(wl_list):
+            b_dict = watchlist_to_basket_dict(name, desc)
+            slug = b_dict["slug"]
+            if args.basket and slug != args.basket:
+                continue
+            symbols = [h["symbol"] for h in b_dict["holdings"]]
+            baskets_data[slug] = {
+                "name": b_dict["name"],
+                "symbols": symbols,
+            }
+            all_symbols.update(symbols)
     else:
         basket_files = get_basket_files(args.basket)
         if not basket_files:

@@ -14,15 +14,75 @@ import json
 import re
 import time
 import zlib
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+
+# Robinhood caps watchlist display_description at 256 characters.
+MAX_DESCRIPTION_LENGTH = 256
+
+# Slugs are truncated to keep the compressed payload small.
+MAX_SLUG_LENGTH = 24
+
+
+_FRACTIONAL_SECONDS_RE = re.compile(r"\.(\d+)")
+
+
+def _normalize_iso(text: str) -> str:
+    """Coerce an ISO 8601 string into a form fromisoformat accepts on Python < 3.11.
+
+    Older versions reject the 'Z' suffix and accept only 3- or 6-digit fractional
+    seconds, while Robinhood emits both 'Z' and variable-precision fractions.
+    """
+    text = text.strip().replace("Z", "+00:00")
+    match = _FRACTIONAL_SECONDS_RE.search(text)
+    if match:
+        digits = match.group(1)[:6].ljust(6, "0")
+        text = f"{text[:match.start()]}.{digits}{text[match.end():]}"
+    return text
+
+
+def _to_epoch(value: Any) -> Optional[float]:
+    """Normalize an int/float epoch or ISO 8601 string into epoch seconds.
+
+    Naive timestamps are treated as UTC. Returns None when the value cannot be parsed.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            dt = datetime.datetime.fromisoformat(_normalize_iso(value))
+        except ValueError:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt.timestamp()
+    return None
+
+
+def _first_number(order: Dict[str, Any], *keys: str) -> float:
+    """Return the first key whose value parses as a number, treating None/'' as absent.
+
+    Robinhood returns `quantity: null` on dollar-amount orders and carries the real
+    figure in `cumulative_quantity`, so a plain dict.get() fallback is not enough.
+    """
+    for key in keys:
+        raw = order.get(key)
+        if raw is None or raw == "":
+            continue
+        try:
+            return float(raw)
+        except (ValueError, TypeError):
+            continue
+    return 0.0
 
 
 def encode_watchlist_metadata(
     slug: str,
     target_weights: Dict[str, float],
     rebalance_threshold_pct: float = 5.0,
-    description: str = "",
     snapshot: Optional[Dict[str, Any]] = None,
+    max_length: int = MAX_DESCRIPTION_LENGTH,
 ) -> str:
     """Encode basket metadata into zlib-compressed Base64 display_description string.
 
@@ -33,24 +93,23 @@ def encode_watchlist_metadata(
         slug: Basket slug identifier.
         target_weights: Dict mapping symbol to target weight percentage (e.g. {'WDC': 30, 'STX': 30}).
         rebalance_threshold_pct: Rebalance threshold percentage.
-        description: Optional human-readable description.
         snapshot: Optional snapshot dict with keys 'ts' (timestamp) and 'h' (holdings dict).
+        max_length: Reject results longer than this (Robinhood's limit is 256).
 
     Returns:
         Compressed Base64 string prefixed with 'Z64:'.
+
+    Raises:
+        ValueError: If the encoded result exceeds max_length, which Robinhood would
+            reject with an opaque API error.
     """
     ts_val = 0
     snap_h = {}
     if snapshot:
-        snap_ts = snapshot.get("ts")
-        if isinstance(snap_ts, str):
-            try:
-                dt = datetime.datetime.fromisoformat(snap_ts.replace("Z", "+00:00"))
-                ts_val = int(dt.timestamp())
-            except ValueError:
-                ts_val = int(time.time())
-        elif isinstance(snap_ts, (int, float)):
-            ts_val = int(snap_ts)
+        ts_epoch = _to_epoch(snapshot.get("ts"))
+        if ts_epoch is None and snapshot.get("ts") is not None:
+            ts_epoch = time.time()
+        ts_val = int(ts_epoch) if ts_epoch else 0
         snap_h = snapshot.get("h", {})
 
     symbol_map = {}
@@ -77,9 +136,7 @@ def encode_watchlist_metadata(
         else:
             symbol_map[sym] = [weight_val]
 
-    clean_slug = slug
-    if len(clean_slug) > 24:
-        clean_slug = clean_slug[:24]
+    clean_slug = slug[:MAX_SLUG_LENGTH]
 
     metadata: Dict[str, Any] = {
         "s": clean_slug,
@@ -93,7 +150,16 @@ def encode_watchlist_metadata(
     json_str = json.dumps(metadata, separators=(",", ":"))
     compressed = zlib.compress(json_str.encode("utf-8"))
     b64_str = base64.b64encode(compressed).decode("utf-8")
-    return f"Z64:{b64_str}"
+    encoded = f"Z64:{b64_str}"
+
+    if len(encoded) > max_length:
+        raise ValueError(
+            f"Encoded basket metadata is {len(encoded)} chars, exceeding the "
+            f"{max_length}-char watchlist description limit "
+            f"({len(target_weights)} symbols, {len(snap_h)} with holdings). "
+            "Reduce the number of symbols or split the basket."
+        )
+    return encoded
 
 
 def decode_watchlist_metadata(display_description: Optional[str]) -> Optional[Dict[str, Any]]:
@@ -170,6 +236,42 @@ def decode_watchlist_metadata(display_description: Optional[str]) -> Optional[Di
     return data
 
 
+def parse_watchlists_json(raw: str) -> List[Dict[str, Any]]:
+    """Parse a --watchlists-json CLI argument into a list of watchlist dicts.
+
+    Accepts either a bare JSON array or the {'watchlists': [...]} envelope
+    returned by get_watchlists.
+
+    Raises:
+        json.JSONDecodeError: If the argument is not valid JSON.
+        ValueError: If the payload is not a list of watchlists.
+    """
+    data = json.loads(raw)
+    if isinstance(data, dict) and "watchlists" in data:
+        data = data["watchlists"]
+    if not isinstance(data, list):
+        raise ValueError(
+            "Expected a JSON array of watchlists or an object with a 'watchlists' key"
+        )
+    return data
+
+
+def iter_watchlist_baskets(
+    watchlists: List[Dict[str, Any]],
+) -> Iterator[Tuple[str, str, Dict[str, Any]]]:
+    """Yield (display_name, display_description, metadata) for basket-bearing watchlists.
+
+    Watchlists whose description carries no decodable basket metadata are skipped,
+    so ordinary (non-basket) watchlists pass through harmlessly.
+    """
+    for wl in watchlists:
+        desc = wl.get("display_description") or ""
+        metadata = decode_watchlist_metadata(desc)
+        if not metadata:
+            continue
+        yield wl.get("display_name", "Unknown"), desc, metadata
+
+
 def reconstruct_basket_positions(
     orders: List[Dict[str, Any]],
     basket_symbols: Optional[List[str]] = None,
@@ -210,7 +312,7 @@ def reconstruct_basket_positions(
     # Initialize from snapshot baseline if available
     snapshot_ts = None
     if snapshot:
-        snapshot_ts = snapshot.get("ts")
+        snapshot_ts = _to_epoch(snapshot.get("ts"))
         snap_holdings = snapshot.get("h", {})
         for sym, detail in snap_holdings.items():
             if not basket_symbols or sym in basket_symbols:
@@ -242,17 +344,16 @@ def reconstruct_basket_positions(
             continue
 
         # If a snapshot timestamp exists, skip orders created before or at snapshot timestamp
-        created_at = order.get("created_at")
-        if snapshot_ts and created_at and created_at <= snapshot_ts:
+        created_ts = _to_epoch(order.get("created_at"))
+        if snapshot_ts and created_ts is not None and created_ts <= snapshot_ts:
             continue
 
-        try:
-            qty = float(order.get("quantity", order.get("cumulative_quantity", 0)))
-            price = float(order.get("average_price", order.get("price", 0)))
-        except (ValueError, TypeError):
+        qty = _first_number(order, "quantity", "cumulative_quantity")
+        price = _first_number(order, "average_price", "price")
+        if qty <= 0:
             continue
 
-        side = order.get("side", "").lower()
+        side = (order.get("side") or "").lower()
 
         if symbol not in holdings:
             holdings[symbol] = {"shares": 0.0, "total_cost": 0.0, "avg_cost": 0.0}

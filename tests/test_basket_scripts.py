@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -175,6 +176,78 @@ class TestCalcDrift(unittest.TestCase):
         self.assertEqual(len(drift_res["flagged"]), 2)
         self.assertIn("WDC", drift_res["flagged"])
         self.assertIn("STX", drift_res["flagged"])
+
+
+class TestWatchlistCLI(unittest.TestCase):
+    """End-to-end tests for the --watchlists-json path of each script.
+
+    This path previously dropped every compressed basket, so it is exercised
+    through the real CLI rather than by calling helpers directly.
+    """
+
+    PRICES = json.dumps({"WDC": 60.0, "STX": 20.0})
+
+    def setUp(self):
+        from basket_utils import encode_watchlist_metadata
+
+        desc = encode_watchlist_metadata(
+            "storage-leaders",
+            {"WDC": 50.0, "STX": 50.0},
+            rebalance_threshold_pct=5.0,
+            snapshot={"ts": 1721861640, "h": {"WDC": [10.0, 50.0]}},
+        )
+        self.watchlists = json.dumps([
+            {"display_name": "Basket: Storage Leaders", "display_description": desc},
+            {"display_name": "My Faves", "display_description": "just a normal watchlist"},
+        ])
+
+    def run_script(self, script, *args):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / script), "--watchlists-json", self.watchlists, *args],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_calc_performance_reads_compressed_basket(self):
+        out = self.run_script("calc_performance.py", "--prices", self.PRICES)
+        self.assertEqual(out["basket"], "Storage Leaders")
+        self.assertEqual(out["total_invested"], 500.0)
+        self.assertEqual(out["current_value"], 600.0)  # 10 shares @ $60
+        self.assertEqual(out["total_pnl"], 100.0)
+
+    def test_calc_drift_reads_compressed_basket(self):
+        out = self.run_script("calc_drift.py", "--prices", self.PRICES)
+        self.assertEqual(out["basket"], "Storage Leaders")
+        self.assertEqual(out["threshold_pct"], 5.0)
+        self.assertIn("WDC", out["flagged"])
+
+    def test_calc_drift_threshold_flag_overrides_basket_metadata(self):
+        # The basket carries a 5.0 threshold; an explicit flag must win.
+        out = self.run_script("calc_drift.py", "--prices", self.PRICES, "--threshold", "0.5")
+        self.assertEqual(out["threshold_pct"], 0.5)
+
+    def test_basket_summary_reads_compressed_basket(self):
+        out = self.run_script("basket_summary.py", "--format", "json")
+        self.assertEqual(len(out["baskets"]), 1)
+        self.assertEqual(out["baskets"][0]["slug"], "storage-leaders")
+        self.assertEqual(out["baskets"][0]["holdings_count"], 2)
+
+    def test_list_symbols_reads_compressed_basket(self):
+        out = self.run_script("list_symbols.py", "--format", "json")
+        self.assertEqual(out["total_baskets"], 1)
+        self.assertEqual(out["unique_symbols"], ["STX", "WDC"])
+
+    def test_invalid_watchlists_json_exits_nonzero(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPTS_DIR / "list_symbols.py"),
+             "--watchlists-json", "not json", "--format", "json"],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("Error parsing --watchlists-json", result.stderr)
 
 
 if __name__ == "__main__":
