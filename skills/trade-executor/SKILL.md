@@ -173,6 +173,8 @@ When a trade is executed **at the basket level** (e.g. "invest $500 in my AI Lea
 1. Fetch the target Watchlist using `get_watchlists`.
 2. Compute the updated baseline snapshot after fill using `update_basket_watchlist_baseline`.
 3. Update the Watchlist `display_description` on Robinhood using `update_watchlist`.
+4. **Verify**: Re-fetch the Watchlist via `get_watchlists` and decode the metadata to confirm the snapshot was persisted correctly. Report the updated position to the user.
+5. **If update fails** (network error, API failure, or verification mismatch): use `reconstruct_basket_positions(orders, basket_symbols, snapshot)` with the basket's last-known snapshot from `get_equity_orders` to rebuild positions, then retry the `update_watchlist` call.
 
 ## Tax-Lot Selling (Advanced)
 
