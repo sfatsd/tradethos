@@ -18,6 +18,13 @@ import sys
 from pathlib import Path
 
 
+# Add basket-manager scripts directory to sys.path
+scripts_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(scripts_dir))
+
+from basket_utils import watchlist_to_basket_dict
+
+
 def find_baskets_dir() -> Path:
     """Dynamically locate the data/baskets directory by traversing upwards."""
     curr = Path(__file__).resolve().parent
@@ -124,6 +131,7 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--basket", help="Basket slug (e.g. storage-and-memory-index)")
     group.add_argument("--all", action="store_true", help="Process all baskets")
+    group.add_argument("--watchlists-json", help="JSON array of watchlists returned by get_watchlists")
     parser.add_argument("--prices", required=True,
                         help="JSON object of symbol:price pairs")
     parser.add_argument("--format", choices=["json", "table"], default="json",
@@ -136,13 +144,30 @@ def main():
         print(f"Error: Invalid JSON in --prices: {e}", file=sys.stderr)
         sys.exit(1)
 
-    basket_files = get_basket_files(args.basket, args.all)
     results = []
 
-    for filepath in basket_files:
-        data = load_basket(filepath)
-        perf = calc_basket_perf(data, prices)
-        results.append(perf)
+    if args.watchlists_json:
+        try:
+            wl_list = json.loads(args.watchlists_json)
+            if isinstance(wl_list, dict) and "watchlists" in wl_list:
+                wl_list = wl_list["watchlists"]
+            for wl in wl_list:
+                desc = wl.get("display_description", "")
+                if not desc or "{" not in desc:
+                    continue
+                name = wl.get("display_name", "Unknown")
+                b_dict = watchlist_to_basket_dict(name, desc)
+                perf = calc_basket_perf(b_dict, prices)
+                results.append(perf)
+        except json.JSONDecodeError as e:
+            print(f"Error parsing --watchlists-json: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        basket_files = get_basket_files(args.basket, args.all)
+        for filepath in basket_files:
+            data = load_basket(filepath)
+            perf = calc_basket_perf(data, prices)
+            results.append(perf)
 
     if args.format == "json":
         output = results[0] if len(results) == 1 else {"baskets": results}

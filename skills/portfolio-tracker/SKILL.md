@@ -35,15 +35,16 @@ Trigger this skill when the user mentions:
 
 ## Available Data Sources (Robinhood MCP)
 
-| Tool | Purpose |
+| Tool / Helper | Purpose |
 |---|---|
 | `get_portfolio` | Account-level value breakdown (equity, options, crypto) and buying power |
-| `get_equity_positions` | Current holdings: symbol, quantity, average cost |
+| `get_equity_positions` | Current total account holdings: symbol, quantity, average cost |
 | `get_equity_quotes` | Real-time prices for P&L calculation (includes previous close for day change) |
+| `get_watchlists` | Fetch cloud-native Robinhood Watchlists containing basket target weights in `display_description` |
+| `get_equity_orders` | Order history used by `basket_utils.reconstruct_basket_positions` to attribute holdings/cost basis per basket |
 | `get_pnl_trade_history` | Per-trade realized P&L (chronological, paginated) |
 | `get_realized_pnl` | Aggregate realized P&L over time windows |
 | `get_equity_tax_lots` | Tax-lot level position detail (cost basis per lot) |
-| `get_equity_orders` | Recent order history |
 
 ## Core Workflows
 
@@ -95,7 +96,7 @@ When the user asks "how much have I made?" or "show my P&L":
 
 When the user asks "how's my basket doing?" or "show me my Storage basket":
 
-1. Load the basket JSON from `data/baskets/{name}.json`
+1. Fetch the target Watchlist using `get_watchlists` and decode metadata with `watchlist_to_basket_dict`
 2. Call `get_equity_quotes(symbols=[all holding symbols])` for current prices and previous close
 3. For each holding with a position (`position != null`), calculate:
    - **Current Value** = position.shares × current_price
@@ -120,7 +121,7 @@ When the user asks "how's my basket doing?" or "show me my Storage basket":
 
 When the user has a basket and asks "am I on track?" or "do I need to rebalance?":
 
-1. Load the basket JSON from `data/baskets/`
+1. Fetch the target Watchlist using `get_watchlists` and decode metadata with `watchlist_to_basket_dict`
 2. Call `get_equity_quotes(symbols=[...])` for current prices
 3. For each holding with a position, calculate actual weights:
    - total_basket_value = sum of (shares × current_price) for all positioned holdings
@@ -134,7 +135,7 @@ When the user has a basket and asks "am I on track?" or "do I need to rebalance?
 | GOOGL | 25.0% | 24.8% | -0.2% | On target ✅ |
 | META | 20.0% | 17.9% | -2.1% | Underweight — consider adding |
 
-5. Flag any holding where `|drift| >= rebalance_threshold_pct` (from the basket JSON, defaulting to 5.0%) as requiring rebalancing attention.
+5. Flag any holding where `|drift| >= rebalance_threshold_pct` (from the Watchlist metadata `th` field, defaulting to 5.0%) as requiring rebalancing attention.
 6. If the user wants to rebalance, calculate the specific trades needed and suggest the **trade-executor** skill.
 
 ### 6. Tax Lot Detail
@@ -149,7 +150,7 @@ When the user asks about cost basis or tax lots:
 
 Rebalancing thresholds are resolved using a **hybrid 3-tier resolution hierarchy**:
 
-1. **Per-Basket Override**: `"rebalance_threshold_pct"` in `data/baskets/{slug}.json` (highest priority)
+1. **Per-Basket Override**: `"rebalance_threshold_pct"` (`th`) in Watchlist description metadata (highest priority)
 2. **Global Config Override**: `"rebalancing.default_threshold_pct"` in `config.json` at root (if file exists)
 3. **Built-in Skill Fallback**: `5.0%` for rebalancing alerts, `2.0%` for on-target threshold (standalone default)
 

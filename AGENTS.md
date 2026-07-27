@@ -7,11 +7,10 @@
 - When presenting stock data, always include the symbol, current price, and relevant context (e.g., day change).
 
 ## Custom Baskets
-- Custom baskets (user-defined indices) are stored as JSON files in `data/baskets/`.
-- Basket filenames use lowercase kebab-case slugs derived from the basket name (e.g., `storage-and-memory-index.json`).
-- Basket data files are gitignored — they contain personal investment data.
-- When reading or writing basket files, always validate JSON structure against the expected schema.
-- Baskets track both **target weights** (the model) and **actual positions** (transactions, avg cost, shares held).
+- Custom baskets (user-defined indices) are stored cloud-natively as Robinhood Watchlists named `Basket: <Name>` (e.g., `Basket: Storage Leaders`).
+- Basket metadata (slug, target model weights, rebalance threshold, baseline holding snapshot) is encoded in the Watchlist `display_description` using `zlib` Base64 compression (`Z64:...`) to fit up to 30+ symbols under Robinhood's 256-character limit.
+- Holdings and cost basis are calculated from baseline snapshots + filled orders retrieved via `get_equity_orders`.
+- After trade fills, baseline snapshots are updated in-place via `update_watchlist` so metadata size never grows over time.
 
 ## Research-First Approach
 - When a user expresses interest in buying a stock they haven't researched yet, suggest running research first before proceeding to trade.

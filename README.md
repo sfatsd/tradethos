@@ -13,7 +13,7 @@ Works with [Claude Code](#claude-code), [Cursor](#cursor), and [Codex](#codex).
 - **Safety-First Trade Execution**: Mandatory review-before-place safety rails for all brokerage operations, ensuring user confirmation prior to order placement.
 - **Deep Market & Fundamental Research**: Full suite of fundamental analysis, financial statement trends, technical indicators (RSI, MACD, Bollinger Bands, Moving Averages), and earnings history.
 - **Stock Screening**: Build and execute live market scanners using Robinhood's Beacon screening engine.
-- **Privacy-First Local Storage**: All personal portfolio data and transaction histories are saved locally under `data/baskets/` and kept out of version control (`.gitignore`).
+- **Cloud-Native Basket Storage**: Custom baskets and portfolio baselines are saved directly on Robinhood servers as custom Watchlists using `Z64:` compressed metadata encoding (`Z64:...`), storing up to 30+ symbols without local database files.
 
 ---
 
@@ -23,7 +23,7 @@ Tradethos ships five specialized skills in `skills/`:
 
 | Skill | Description | Primary MCP Tools Used |
 |---|---|---|
-| **🧺 `basket-manager`** | Create, edit, and manage custom thematic stock baskets with target weights, transaction logs, and average cost calculations. | Local JSON storage under `data/baskets/` |
+| **🧺 `basket-manager`** | Create, edit, and manage custom thematic stock baskets with target weights, baseline snapshots, and Z64 compressed metadata. | `create_watchlist`, `update_watchlist`, `get_watchlists` |
 | **📊 `stock-researcher`** | Conduct structured stock & industry research covering valuation, financials, technical indicators, and earnings. | `get_equity_fundamentals`, `get_financials`, `get_equity_technical_indicators`, `get_earnings_results` |
 | **💰 `trade-executor`** | Review and place market, limit, and stop orders with mandatory safety checks, extended hours handling, and idempotency protection. | `review_equity_order`, `place_equity_order`, `get_equity_tradability`, `cancel_equity_order` |
 | **📈 `portfolio-tracker`** | Monitor open positions, evaluate total account P&L, analyze basket target drift, and highlight rebalancing needs. | `get_portfolio`, `get_equity_positions`, `get_equity_quotes`, `get_realized_pnl` |
