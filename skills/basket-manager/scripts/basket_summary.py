@@ -12,6 +12,13 @@ import sys
 from pathlib import Path
 
 
+# Add basket-manager scripts directory to sys.path
+scripts_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(scripts_dir))
+
+from basket_utils import watchlist_to_basket_dict
+
+
 def find_baskets_dir() -> Path:
     """Dynamically locate the data/baskets directory by traversing upwards."""
     curr = Path(__file__).resolve().parent
@@ -54,22 +61,42 @@ def summarize_basket(data: dict) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Summary of all basket files")
+    parser = argparse.ArgumentParser(description="Summary of all basket files or watchlists")
+    parser.add_argument("--watchlists-json", help="JSON array of watchlists returned by get_watchlists")
     parser.add_argument("--format", choices=["table", "json"], default="table",
                         help="Output format (default: table)")
     args = parser.parse_args()
 
-    basket_files = sorted(p for p in BASKETS_DIR.glob("*.json") if p.name != ".gitkeep")
-    if not basket_files:
-        print("No basket files found.", file=sys.stderr)
-        sys.exit(1)
-
     summaries = []
-    for filepath in basket_files:
-        data = load_basket(filepath)
-        summary = summarize_basket(data)
-        summary["slug"] = filepath.stem
-        summaries.append(summary)
+
+    if args.watchlists_json:
+        try:
+            wl_list = json.loads(args.watchlists_json)
+            if isinstance(wl_list, dict) and "watchlists" in wl_list:
+                wl_list = wl_list["watchlists"]
+            for wl in wl_list:
+                desc = wl.get("display_description", "")
+                if not desc or "{" not in desc:
+                    continue
+                name = wl.get("display_name", "Unknown")
+                b_dict = watchlist_to_basket_dict(name, desc)
+                summary = summarize_basket(b_dict)
+                summary["slug"] = b_dict["slug"]
+                summaries.append(summary)
+        except json.JSONDecodeError as e:
+            print(f"Error parsing --watchlists-json: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        basket_files = sorted(p for p in BASKETS_DIR.glob("*.json") if p.name != ".gitkeep")
+        if not basket_files:
+            print("No basket files found.", file=sys.stderr)
+            sys.exit(1)
+
+        for filepath in basket_files:
+            data = load_basket(filepath)
+            summary = summarize_basket(data)
+            summary["slug"] = filepath.stem
+            summaries.append(summary)
 
     if args.format == "json":
         print(json.dumps({"baskets": summaries}, indent=2))

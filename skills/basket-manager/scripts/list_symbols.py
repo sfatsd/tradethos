@@ -12,6 +12,12 @@ import json
 import sys
 from pathlib import Path
 
+# Add basket-manager scripts directory to sys.path
+scripts_dir = Path(__file__).resolve().parent
+sys.path.insert(0, str(scripts_dir))
+
+from basket_utils import watchlist_to_basket_dict
+
 
 def find_baskets_dir() -> Path:
     """Dynamically locate the data/baskets directory by traversing upwards."""
@@ -45,29 +51,54 @@ def get_basket_files(basket_slug: str = None) -> list[Path]:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Extract symbols from basket files")
+    parser = argparse.ArgumentParser(description="Extract symbols from basket files or watchlists")
     parser.add_argument("--basket", help="Basket slug (e.g. storage-and-memory-index)")
+    parser.add_argument("--watchlists-json", help="JSON array of watchlists returned by get_watchlists")
     parser.add_argument("--format", choices=["table", "json"], default="table",
                         help="Output format (default: table)")
     args = parser.parse_args()
 
-    basket_files = get_basket_files(args.basket)
-    if not basket_files:
-        print("No basket files found.", file=sys.stderr)
-        sys.exit(1)
-
     baskets_data = {}
     all_symbols = set()
 
-    for filepath in basket_files:
-        data = load_basket(filepath)
-        slug = filepath.stem
-        symbols = [h["symbol"] for h in data.get("holdings", [])]
-        baskets_data[slug] = {
-            "name": data.get("name", slug),
-            "symbols": symbols,
-        }
-        all_symbols.update(symbols)
+    if args.watchlists_json:
+        try:
+            wl_list = json.loads(args.watchlists_json)
+            if isinstance(wl_list, dict) and "watchlists" in wl_list:
+                wl_list = wl_list["watchlists"]
+            for wl in wl_list:
+                desc = wl.get("display_description", "")
+                if not desc or "{" not in desc:
+                    continue
+                name = wl.get("display_name", "Unknown")
+                b_dict = watchlist_to_basket_dict(name, desc)
+                slug = b_dict["slug"]
+                if args.basket and slug != args.basket:
+                    continue
+                symbols = [h["symbol"] for h in b_dict["holdings"]]
+                baskets_data[slug] = {
+                    "name": b_dict["name"],
+                    "symbols": symbols,
+                }
+                all_symbols.update(symbols)
+        except json.JSONDecodeError as e:
+            print(f"Error parsing --watchlists-json: {e}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        basket_files = get_basket_files(args.basket)
+        if not basket_files:
+            print("No basket files found.", file=sys.stderr)
+            sys.exit(1)
+
+        for filepath in basket_files:
+            data = load_basket(filepath)
+            slug = filepath.stem
+            symbols = [h["symbol"] for h in data.get("holdings", [])]
+            baskets_data[slug] = {
+                "name": data.get("name", slug),
+                "symbols": symbols,
+            }
+            all_symbols.update(symbols)
 
     if args.format == "json":
         output = {
