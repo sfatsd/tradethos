@@ -28,6 +28,24 @@
 - **Every event carries a `v` field.** The reader accepts every released version. (§9.5)
 - **The data directory is a parameter with default `~/.tradethos`.** It is internal; the user does not configure it. Tests pass a temporary directory. (§10)
 
+## Spec clarifications this plan assumes
+
+The design leaves two points open. This plan resolves them as follows. Fold
+the wording back into the spec before Stage 3 rewrites the skills.
+
+**1. A taken `order_id` inside a batch skips, it does not abort.** §6.7 lists
+"the same `order_id` in a different basket" as an exit-1 refusal, while §6.2
+says a batch records its good fills and reports the rest. The exit-code table
+in §6.2 already implies the answer: exit 1 belongs to the case where the tool
+recorded nothing. This plan therefore skips the taken order with the reason
+`ORDER_IN_OTHER_BASKET` and keeps the other fills. A single-order call still
+exits 1, because it then records nothing.
+
+**2. `--account` is required at `create`.** The design treats the account
+check in `record-fills` as a safety rail, but a basket created without an
+account stores an empty string, and the guard skips itself. Requiring the flag
+at creation keeps the rail load-bearing.
+
 ---
 
 ## File Structure
@@ -179,6 +197,13 @@ class TestRefill(unittest.TestCase):
         with self.assertRaises(WeightError):
             refill({"MSFT": 30, "AAPL": 20}, 1)
 
+    def test_a_skewed_set_that_would_round_to_zero_is_refused(self):
+        # room >= len(others) is not enough on its own. 49:1 over 2 percent
+        # gives 1.96 and 0.04, and the shortfall goes to the larger holding.
+        with self.assertRaises(WeightError) as ctx:
+            refill({"MSFT": 49, "AAPL": 1}, 2)
+        self.assertIn("AAPL", str(ctx.exception))
+
     def test_unknown_mode_is_refused(self):
         with self.assertRaises(WeightError):
             refill({"MSFT": 30}, 80, "sideways")
@@ -320,18 +345,28 @@ def refill(others, room, mode=FILL_PROPORTIONAL):
     for symbol, value in source.items():
         exact[symbol] = value * room / total
 
-    return _largest_remainder(exact, room)
+    result = _largest_remainder(exact, room)
+
+    # `room >= len(others)` is not enough. A skewed set can still round a
+    # small holding to 0: {MSFT: 49, AAPL: 1} with room 2 gives 1.96 and 0.04,
+    # and the shortfall goes to MSFT.
+    zeros = sorted(s for s, v in result.items() if v < 1)
+    if zeros:
+        raise WeightError(
+            "These holdings would fall to 0 percent: %s. Remove them, or give "
+            "the named holding a smaller weight." % ", ".join(zeros))
+    return result
 ```
 
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `python3 -m unittest tests.test_basket_weights -v`
-Expected: PASS, 21 tests.
+Expected: PASS, 22 tests.
 
 - [ ] **Step 5: Run the whole suite to check for regressions**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 64 tests (43 existing plus 21 new).
+Expected: OK, 65 tests (43 existing plus 22 new).
 
 - [ ] **Step 6: Commit**
 
@@ -611,28 +646,45 @@ class EventLog(object):
                 self._handle.close()
                 self._handle = None
 
+    def _parse(self, handle):
+        events = []
+        for number, raw in enumerate(handle, start=1):
+            text = raw.strip()
+            if not text:
+                continue
+            try:
+                event = json.loads(text)
+            except ValueError:
+                raise CorruptLineError(number, text)
+            event["_line"] = number
+            events.append(event)
+        return events
+
     def read(self):
         """Return every event in log order.
 
         Each event carries a `_line` key that holds its 1-based line number.
         Raises CorruptLineError on the first line that is not valid JSON.
+
+        A read takes a shared lock, so it never sees a half-written last line
+        while another session appends. When this object already holds the
+        exclusive lock, it must not ask for a second lock: flock ties a lock
+        to the open file description, so a new descriptor in the same process
+        would block against our own exclusive lock and deadlock.
         """
         if not self.path.exists():
             return []
 
-        events = []
+        if self._depth > 0:
+            with self.path.open("r") as handle:
+                return self._parse(handle)
+
         with self.path.open("r") as handle:
-            for number, raw in enumerate(handle, start=1):
-                text = raw.strip()
-                if not text:
-                    continue
-                try:
-                    event = json.loads(text)
-                except ValueError:
-                    raise CorruptLineError(number, text)
-                event["_line"] = number
-                events.append(event)
-        return events
+            fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+            try:
+                return self._parse(handle)
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
     def count(self):
         """Return the number of events in the log."""
@@ -670,7 +722,7 @@ Expected: PASS, 11 tests. The concurrency test takes about half a second.
 - [ ] **Step 5: Run the whole suite**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 75 tests.
+Expected: OK, 76 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -1016,12 +1068,22 @@ class Position(object):
 
         The average cost does not change. The gain or loss goes to
         realized_pnl. A sale of every share leaves the average cost at zero.
+
+        Returns the share count that it could not cover. A caller that gets a
+        non-zero result must report it; a silent clamp would credit a profit
+        on shares the basket never held.
         """
+        oversold = 0.0
+        if shares > self.shares + 1e-12:
+            oversold = shares - self.shares
+            shares = self.shares
+
         self.realized_pnl += (price - self.avg_cost) * shares
         self.shares = self.shares - shares
         if self.shares <= 1e-12:
             self.shares = 0.0
             self.avg_cost = 0.0
+        return oversold
 
 
 class Holding(object):
@@ -1067,10 +1129,11 @@ class Basket(object):
 class ReplayResult(object):
     """The outcome of a replay."""
 
-    def __init__(self, baskets, ignored, order_index):
+    def __init__(self, baskets, ignored, order_index, clamped=None):
         self.baskets = baskets
         self.ignored = ignored
         self.order_index = order_index
+        self.clamped = clamped if clamped is not None else []
 
 
 def replay(events):
@@ -1086,6 +1149,7 @@ def replay(events):
     baskets = OrderedDict()
     ignored = []
     order_index = {}
+    clamped = []
 
     for event in events:
         slug = event.get("slug")
@@ -1159,12 +1223,21 @@ def replay(events):
             if event_type == "buy":
                 holding.position.buy(shares, price)
             else:
-                holding.position.sell(shares, price)
+                oversold = holding.position.sell(shares, price)
+                if oversold > 0:
+                    clamped.append({
+                        "line": event.get("_line"),
+                        "order_id": order_id,
+                        "slug": slug,
+                        "symbol": event.get("symbol"),
+                        "requested": shares,
+                        "oversold": oversold,
+                    })
 
             if order_id:
                 order_index[order_id] = slug
 
-    return ReplayResult(baskets, ignored, order_index)
+    return ReplayResult(baskets, ignored, order_index, clamped)
 
 
 def snapshot_dict(basket):
@@ -1212,7 +1285,7 @@ Expected: PASS, 28 tests.
 - [ ] **Step 5: Run the whole suite**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 103 tests.
+Expected: OK, 104 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -1605,7 +1678,7 @@ def cmd_create(args, store):
         events = [make_event(
             "basket_created", slug, name=args.name,
             description=args.description or "",
-            account_number=args.account or "",
+            account_number=args.account,
             rebalance_threshold_pct=args.threshold)]
         for symbol in raw:
             events.append(make_event(
@@ -1679,35 +1752,45 @@ def print_table(command, payload):
 
 
 def build_parser():
+    # --data-dir and --format must work before and after the subcommand.
+    # argparse hands everything after the subcommand name to the subparser, so
+    # an option defined only on the root parser fails there with exit code 2.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--data-dir", default=None, help=argparse.SUPPRESS)
+    common.add_argument("--format", choices=["json", "table"], default="json")
+
     parser = argparse.ArgumentParser(
-        prog="basket.py", description="Manage local stock baskets")
-    parser.add_argument("--data-dir", default=None, help=argparse.SUPPRESS)
-    parser.add_argument("--format", choices=["json", "table"], default="json")
+        prog="basket.py", parents=[common],
+        description="Manage local stock baskets")
     sub = parser.add_subparsers(dest="command")
 
-    p = sub.add_parser("create", help="Create a basket")
+    def add(name, help_text):
+        return sub.add_parser(name, parents=[common], help=help_text)
+
+    p = add("create", "Create a basket")
     p.add_argument("name")
     p.add_argument("--symbols", required=True, help="NVDA:2,MSFT:1")
     p.add_argument("--description", default="")
-    p.add_argument("--account", default="")
+    p.add_argument("--account", required=True,
+                   help="The brokerage account that will hold these trades")
     p.add_argument("--threshold", type=float, default=5.0)
     p.set_defaults(func=cmd_create)
 
-    p = sub.add_parser("list", help="List every basket")
+    p = add("list", "List every basket")
     p.set_defaults(func=cmd_list)
 
-    p = sub.add_parser("show", help="Show one basket")
+    p = add("show", "Show one basket")
     p.add_argument("slug")
     p.add_argument("--prices", default="")
     p.set_defaults(func=cmd_show)
 
-    p = sub.add_parser("history", help="Print the events of a basket")
+    p = add("history", "Print the events of a basket")
     p.add_argument("slug", nargs="?", default=None)
     p.add_argument("--symbol", default=None)
     p.add_argument("--since", default=None)
     p.set_defaults(func=cmd_history)
 
-    p = sub.add_parser("export", help="Write the snapshot files")
+    p = add("export", "Write the snapshot files")
     p.add_argument("slug", nargs="?", default=None)
     p.set_defaults(func=cmd_export)
 
@@ -1758,7 +1841,7 @@ Expected: PASS, 15 tests.
 - [ ] **Step 5: Run the whole suite**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 118 tests.
+Expected: OK, 119 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -1935,6 +2018,20 @@ def refill_or_fail(others, room, mode):
         raise CliError(str(error), "BAD_WEIGHTS", {})
 
 
+def check_target_weight(weight, symbol):
+    """Reject a target weight outside 1 to 100.
+
+    argparse accepts any integer, so 0 and negatives reach the command. A
+    weight of 0 means the user wants the holding gone, and remove-holding is
+    the command for that.
+    """
+    if weight < 1 or weight > 100:
+        raise CliError(
+            "A target weight must be between 1 and 100, but %s was given %d. "
+            "Use remove-holding to drop a holding." % (symbol, weight),
+            "BAD_WEIGHTS", {"symbol": symbol, "weight": weight})
+
+
 def plan_weight_change(basket, target_symbol, target_weight, fill_mode,
                        removing=False):
     """Return the complete weight set after a single-holding change.
@@ -1983,9 +2080,13 @@ def weight_events(basket, new_weights):
 Add the command functions:
 
 ```python
-def _apply_weights(store, args, slug, new_weights, extra_events=()):
-    """Write a weight change, or return the dry-run view."""
-    _, basket = store.require(slug)
+def _apply_weights(store, args, slug, basket, new_weights, extra_events=()):
+    """Write one batch of events, or return the dry-run view.
+
+    Every weight command appends exactly once. Two appends would leave a
+    window in which the log breaks the sum-to-100 invariant that section 6.5
+    promises can never happen.
+    """
     events = list(extra_events) + weight_events(basket, new_weights)
     if args.dry_run:
         return {"dry_run": True, "slug": slug, "weights": new_weights,
@@ -2002,8 +2103,9 @@ def cmd_set_weight(args, store):
         if symbol not in basket.holdings:
             raise CliError("The basket does not hold %s" % symbol,
                            "SYMBOL_NOT_FOUND", {"symbol": symbol})
+        check_target_weight(args.weight, symbol)
         new_weights = plan_weight_change(basket, symbol, args.weight, args.fill)
-        return _apply_weights(store, args, args.slug, new_weights)
+        return _apply_weights(store, args, args.slug, basket, new_weights)
 
 
 def cmd_set_weights(args, store):
@@ -2022,7 +2124,8 @@ def cmd_set_weights(args, store):
                 "The basket does not hold: %s" % ", ".join(unknown),
                 "SYMBOL_NOT_FOUND", {"unknown": unknown})
 
-        return _apply_weights(store, args, args.slug, normalize_or_fail(given))
+        return _apply_weights(store, args, args.slug, basket,
+                              normalize_or_fail(given))
 
 
 def cmd_add_holding(args, store):
@@ -2035,15 +2138,15 @@ def cmd_add_holding(args, store):
         if len(basket.holdings) + 1 > 100:
             raise CliError("A basket holds at most 100 holdings",
                            "TOO_MANY_HOLDINGS", {})
+        check_target_weight(args.weight, symbol)
 
         new_weights = plan_weight_change(basket, symbol, args.weight, args.fill)
         added = make_event("holding_added", args.slug, symbol=symbol,
                            weight=int(args.weight), thesis=args.thesis or "")
-        if args.dry_run:
-            return {"dry_run": True, "slug": args.slug, "weights": new_weights}
-        store.write([added], {args.slug})
-        _, basket = store.require(args.slug)
-        return _apply_weights(store, args, args.slug, new_weights)
+        # weight_events skips the new symbol, because the basket does not hold
+        # it yet. The holding_added event carries its weight instead.
+        return _apply_weights(store, args, args.slug, basket, new_weights,
+                              extra_events=[added])
 
 
 def cmd_remove_holding(args, store):
@@ -2063,13 +2166,11 @@ def cmd_remove_holding(args, store):
 
         new_weights = plan_weight_change(basket, symbol, 0, args.fill,
                                          removing=True)
-        if args.dry_run:
-            return {"dry_run": True, "slug": args.slug, "weights": new_weights}
-
         removed = make_event("holding_removed", args.slug, symbol=symbol)
-        store.write([removed], {args.slug})
-        _, basket = store.require(args.slug)
-        return _apply_weights(store, args, args.slug, new_weights)
+        # new_weights omits the removed symbol, so weight_events never emits
+        # an event for it.
+        return _apply_weights(store, args, args.slug, basket, new_weights,
+                              extra_events=[removed])
 
 
 def cmd_set_name(args, store):
@@ -2125,6 +2226,7 @@ def cmd_delete(args, store):
                 "BASKET_HAS_POSITIONS",
                 {"symbols": held, "total_invested": basket.total_invested})
         store.log.append([make_event("basket_deleted", args.slug)])
+        maybe_backup(store)
 
     path = store.baskets_dir / (args.slug + ".json")
     if path.exists():
@@ -2141,7 +2243,7 @@ Add the subparsers inside `build_parser`, before `return parser`:
     def add_fill(p):
         p.add_argument("--fill", choices=list(FILL_MODES), default=FILL_MODES[0])
 
-    p = sub.add_parser("set-weight", help="Set one target weight")
+    p = add("set-weight", "Set one target weight")
     p.add_argument("slug")
     p.add_argument("--symbol", required=True)
     p.add_argument("--weight", type=int, required=True)
@@ -2149,13 +2251,13 @@ Add the subparsers inside `build_parser`, before `return parser`:
     add_dry_run(p)
     p.set_defaults(func=cmd_set_weight)
 
-    p = sub.add_parser("set-weights", help="Set every target weight")
+    p = add("set-weights", "Set every target weight")
     p.add_argument("slug")
     p.add_argument("--weights", required=True)
     add_dry_run(p)
     p.set_defaults(func=cmd_set_weights)
 
-    p = sub.add_parser("add-holding", help="Add a symbol")
+    p = add("add-holding", "Add a symbol")
     p.add_argument("slug")
     p.add_argument("--symbol", required=True)
     p.add_argument("--weight", type=int, required=True)
@@ -2164,7 +2266,7 @@ Add the subparsers inside `build_parser`, before `return parser`:
     add_dry_run(p)
     p.set_defaults(func=cmd_add_holding)
 
-    p = sub.add_parser("remove-holding", help="Remove a symbol")
+    p = add("remove-holding", "Remove a symbol")
     p.add_argument("slug")
     p.add_argument("--symbol", required=True)
     p.add_argument("--force", action="store_true")
@@ -2172,28 +2274,28 @@ Add the subparsers inside `build_parser`, before `return parser`:
     add_dry_run(p)
     p.set_defaults(func=cmd_remove_holding)
 
-    p = sub.add_parser("set-thesis", help="Change a thesis")
+    p = add("set-thesis", "Change a thesis")
     p.add_argument("slug")
     p.add_argument("--symbol", required=True)
     p.add_argument("--thesis", required=True)
     p.set_defaults(func=cmd_set_thesis)
 
-    p = sub.add_parser("set-name", help="Change the display name")
+    p = add("set-name", "Change the display name")
     p.add_argument("slug")
     p.add_argument("--name", required=True)
     p.set_defaults(func=cmd_set_name)
 
-    p = sub.add_parser("set-description", help="Change the description")
+    p = add("set-description", "Change the description")
     p.add_argument("slug")
     p.add_argument("--description", required=True)
     p.set_defaults(func=cmd_set_description)
 
-    p = sub.add_parser("set-threshold", help="Change the rebalance threshold")
+    p = add("set-threshold", "Change the rebalance threshold")
     p.add_argument("slug")
     p.add_argument("--threshold", type=float, required=True)
     p.set_defaults(func=cmd_set_threshold)
 
-    p = sub.add_parser("delete", help="Delete a basket")
+    p = add("delete", "Delete a basket")
     p.add_argument("slug")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_delete)
@@ -2207,7 +2309,7 @@ Expected: PASS, 14 tests.
 - [ ] **Step 5: Run the whole suite**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 132 tests.
+Expected: OK, 133 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -2314,14 +2416,30 @@ class TestRecordFills(CliTestCase):
         position = [h for h in shown["holdings"] if h["symbol"] == "NVDA"][0]["position"]
         self.assertEqual(position["shares"], 10.0)
 
-    def test_an_id_in_another_basket_is_refused(self):
+    def test_an_id_in_another_basket_is_skipped(self):
         other = self.make_basket(name="Other", symbols="NVDA:100")
         self.record(orders_response(order()), "o1")
         code, _, err = self.run_cli("record-fills", other, "--orders-json",
                                     orders_response(order()), "--order-ids", "o1",
                                     "--account", "000000000")
+        # Nothing else was in the batch, so nothing was recorded.
         self.assertEqual(code, 1)
         self.assertIn("ORDER_IN_OTHER_BASKET", err)
+
+    def test_a_batch_keeps_its_good_fills_when_one_id_is_taken(self):
+        other = self.make_basket(name="Other", symbols="NVDA:50,MSFT:50")
+        self.record(orders_response(order(order_id="taken")), "taken")
+        batch = orders_response(
+            order(order_id="taken"),
+            order(order_id="fresh", symbol="MSFT", quantity="4",
+                  average_price="25.00"))
+        code, out, err = self.run_cli(
+            "record-fills", other, "--orders-json", batch,
+            "--order-ids", "taken,fresh", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["fresh"])
+        reasons = [s["reason"] for s in out["skipped"]]
+        self.assertIn("ORDER_IN_OTHER_BASKET", reasons)
 
     def test_a_wrong_account_is_refused(self):
         code, _, err = self.record(orders_response(order()), "o1", "999999")
@@ -2378,6 +2496,45 @@ class TestRecordFills(CliTestCase):
         code, _, err = self.record(orders_response(order()), "missing")
         self.assertEqual(code, 1)
         self.assertIn("ORDER_NOT_IN_RESPONSE", err)
+
+    def test_remove_holding_refuses_a_held_position(self):
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("remove-holding", self.slug, "--symbol", "NVDA")
+        self.assertEqual(code, 1)
+        self.assertIn("HOLDING_HAS_POSITION", err)
+
+    def test_remove_holding_force_removes_a_held_position(self):
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("remove-holding", self.slug,
+                                    "--symbol", "NVDA", "--force")
+        self.assertEqual(code, 0, err)
+        shown = self.run_cli("show", self.slug)[1]
+        self.assertEqual([h["symbol"] for h in shown["holdings"]], ["MSFT"])
+        self.assertEqual(shown["holdings"][0]["target_weight_pct"], 100)
+
+    def test_delete_refuses_a_basket_that_holds_shares(self):
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("delete", self.slug)
+        self.assertEqual(code, 1)
+        self.assertIn("BASKET_HAS_POSITIONS", err)
+
+    def test_delete_force_removes_the_basket(self):
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("delete", self.slug, "--force")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.run_cli("list")[1]["baskets"], [])
+
+    def test_a_zero_target_weight_is_refused(self):
+        code, _, err = self.run_cli("set-weight", self.slug, "--symbol", "NVDA",
+                                    "--weight", "0")
+        self.assertEqual(code, 1)
+        self.assertIn("between 1 and 100", err)
+
+    def test_a_negative_target_weight_is_refused(self):
+        code, _, err = self.run_cli("set-weight", self.slug, "--symbol", "NVDA",
+                                    "--weight", "-5")
+        self.assertEqual(code, 1)
+        self.assertIn("between 1 and 100", err)
 ```
 
 - [ ] **Step 2: Run the test to verify it fails**
@@ -2513,10 +2670,13 @@ def cmd_record_fills(args, store):
                 already.append(order_id)
                 continue
             if owner is not None:
-                raise CliError(
-                    "Order %s already funds basket %s" % (order_id, owner),
-                    "ORDER_IN_OTHER_BASKET",
-                    {"order_id": order_id, "basket": owner})
+                # Skip, do not abort. Section 6.2 says a batch keeps its good
+                # fills; the exit-code table then gives exit 1 only when the
+                # tool recorded nothing at all.
+                skipped.append({"order_id": order_id,
+                                "reason": "ORDER_IN_OTHER_BASKET",
+                                "basket": owner})
+                continue
 
             symbol = (order.get("symbol") or "").upper()
             if symbol not in basket.holdings:
@@ -2586,7 +2746,7 @@ def cmd_record_fills(args, store):
 Add the subparser inside `build_parser`:
 
 ```python
-    p = sub.add_parser("record-fills", help="Record filled orders")
+    p = add("record-fills", "Record filled orders")
     p.add_argument("slug")
     p.add_argument("--orders-json", required=True)
     p.add_argument("--order-ids", required=True)
@@ -2598,12 +2758,12 @@ Add the subparser inside `build_parser`:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `python3 -m unittest tests.test_basket_cli.TestRecordFills -v`
-Expected: PASS, 13 tests.
+Expected: PASS, 21 tests.
 
 - [ ] **Step 5: Run the whole suite**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 145 tests.
+Expected: OK, 154 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -2813,13 +2973,13 @@ def cmd_plan_sell(args, store):
 Add the subparsers inside `build_parser`:
 
 ```python
-    p = sub.add_parser("plan-buy", help="Plan a whole-basket purchase")
+    p = add("plan-buy", "Plan a whole-basket purchase")
     p.add_argument("slug")
     p.add_argument("--amount", type=float, required=True)
     p.add_argument("--prices", default="")
     p.set_defaults(func=cmd_plan_buy)
 
-    p = sub.add_parser("plan-sell", help="Plan a whole-basket sale")
+    p = add("plan-sell", "Plan a whole-basket sale")
     p.add_argument("slug")
     group = p.add_mutually_exclusive_group(required=True)
     group.add_argument("--amount", type=float)
@@ -2836,7 +2996,7 @@ Expected: PASS, 8 tests.
 - [ ] **Step 5: Run the whole suite**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 153 tests.
+Expected: OK, 162 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -2941,8 +3101,43 @@ class TestVerifyAndBackup(CliTestCase):
         self.assertGreater(marker["events"], 0)
 
     def test_verify_warns_when_no_backup_exists(self):
+        # setUp already wrote events, and the first write with no marker runs
+        # a backup by itself. Remove the marker to reach the no-backup path.
+        marker = self.data_dir / "backup.marker"
+        if marker.exists():
+            marker.unlink()
         out = self.run_cli("verify")[1]
-        self.assertTrue(any("backup" in w.lower() for w in out["warnings"]))
+        self.assertTrue(any("No backup marker" in w for w in out["warnings"]))
+
+    def test_verify_warns_when_the_backup_is_stale(self):
+        self.run_cli("backup")
+        self.run_cli("set-weight", self.slug, "--symbol", "NVDA", "--weight", "70")
+        out = self.run_cli("verify")[1]
+        self.assertTrue(any("last backup held" in w for w in out["warnings"]))
+
+    def test_verify_reports_a_clamped_oversell(self):
+        # A hand-edited log can hold a sale larger than the basket ever held.
+        log = self.data_dir / "events.log.jsonl"
+        buy_line = [l for l in log.read_text().splitlines() if '"type":"buy"' in l][0]
+        bad = buy_line.replace('"type":"buy"', '"type":"sell"')
+        bad = bad.replace('"order_id":"b1"', '"order_id":"bad"')
+        bad = bad.replace('"shares":10.0', '"shares":999.0')
+        with log.open("a") as handle:
+            handle.write(bad + "\n")
+        out = self.run_cli("verify")[1]
+        self.assertTrue(out["clamped_sells"])
+        self.assertTrue(any("dropped" in w for w in out["warnings"]))
+
+    def test_verify_accepts_a_slug(self):
+        code, out, err = self.run_cli("verify", self.slug)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["baskets"], [self.slug])
+
+    def test_backup_honours_the_to_option(self):
+        target = self.data_dir / "elsewhere"
+        code, out, err = self.run_cli("backup", "--to", str(target))
+        self.assertEqual(code, 0, err)
+        self.assertTrue(Path(out["path"]).parent == target)
 
     def test_verify_stops_warning_after_a_backup(self):
         self.run_cli("backup")
@@ -3017,11 +3212,11 @@ def read_marker(store):
         return None
 
 
-def run_backup(store):
+def run_backup(store, to=None):
     """Copy the log to a timestamped file and update the marker."""
     if not store.log.path.exists():
         return None
-    backups = store.data_dir / BACKUP_DIR_NAME
+    backups = Path(to) if to else store.data_dir / BACKUP_DIR_NAME
     backups.mkdir(parents=True, exist_ok=True)
     with store.log.locked():
         count = store.log.count()
@@ -3044,7 +3239,7 @@ def maybe_backup(store):
 
 
 def cmd_backup(args, store):
-    target = run_backup(store)
+    target = run_backup(store, args.to)
     if target is None:
         raise CliError("There is no log to back up", "NO_LOG", {})
     return {"path": str(target), "events": store.log.count()}
@@ -3054,14 +3249,32 @@ def cmd_verify(args, store):
     result = store.load()          # raises CliError(exit 3) on a corrupt line
     warnings = []
 
+    if args.slug and args.slug not in result.baskets:
+        raise CliError("No basket has the slug %r" % args.slug,
+                       "BASKET_NOT_FOUND",
+                       {"slug": args.slug, "available": sorted(result.baskets)})
+
+    def wanted(slug):
+        return args.slug is None or slug == args.slug
+
     ignored = []
     for entry in result.ignored:
+        if not wanted(entry["slug"]):
+            continue
         ignored.append(entry)
         if entry["slug"] != entry["kept_by"]:
             warnings.append(
                 "Line %s repeats order %s. Basket %s kept it, so basket %s "
                 "lost that claim." % (entry["line"], entry["order_id"],
                                       entry["kept_by"], entry["slug"]))
+
+    clamped = [c for c in result.clamped if wanted(c["slug"])]
+    for entry in clamped:
+        warnings.append(
+            "Line %s sells %s shares of %s, but basket %s held fewer. The "
+            "replay covered what it could and dropped %s shares."
+            % (entry["line"], entry["requested"], entry["symbol"],
+               entry["slug"], entry["oversold"]))
 
     marker = read_marker(store)
     count = store.log.count()
@@ -3076,7 +3289,9 @@ def cmd_verify(args, store):
     rows = None
     if positions is not None:
         claims = {}
-        for basket in result.baskets.values():
+        for slug, basket in result.baskets.items():
+            if not wanted(slug):
+                continue
             for symbol, holding in basket.holdings.items():
                 if holding.has_position:
                     claims[symbol] = claims.get(symbol, 0.0) + holding.position.shares
@@ -3098,8 +3313,9 @@ def cmd_verify(args, store):
             rows.append({"symbol": symbol, "claimed": round(claimed, 6),
                          "account": round(actual, 6), "state": state})
 
-    return {"baskets": sorted(result.baskets), "events": count,
-            "ignored_events": ignored, "positions": rows, "warnings": warnings}
+    return {"baskets": sorted(s for s in result.baskets if wanted(s)),
+            "events": count, "ignored_events": ignored,
+            "clamped_sells": clamped, "positions": rows, "warnings": warnings}
 ```
 
 Call `maybe_backup` from `Store.write`, after the export:
@@ -3115,12 +3331,12 @@ Call `maybe_backup` from `Store.write`, after the export:
 Add the subparsers inside `build_parser`:
 
 ```python
-    p = sub.add_parser("verify", help="Check the log against the account")
+    p = add("verify", "Check the log against the account")
     p.add_argument("slug", nargs="?", default=None)
     p.add_argument("--positions", default="")
     p.set_defaults(func=cmd_verify)
 
-    p = sub.add_parser("backup", help="Copy the event log")
+    p = add("backup", "Copy the event log")
     p.add_argument("--to", default=None)
     p.set_defaults(func=cmd_backup)
 ```
@@ -3128,12 +3344,12 @@ Add the subparsers inside `build_parser`:
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `python3 -m unittest tests.test_basket_cli.TestVerifyAndBackup -v`
-Expected: PASS, 10 tests.
+Expected: PASS, 15 tests.
 
 - [ ] **Step 5: Run the whole suite**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 163 tests.
+Expected: OK, 177 tests.
 
 - [ ] **Step 6: Commit**
 
@@ -3297,7 +3513,7 @@ Expected: PASS, 3 tests. If any fail, the failure is in an earlier task; fix it 
 - [ ] **Step 3: Run the whole suite on the oldest supported Python**
 
 Run: `python3 -m unittest discover -s tests`
-Expected: OK, 166 tests.
+Expected: OK, 180 tests.
 
 If a 3.9 interpreter is available, also run:
 `python3.9 -m unittest discover -s tests`
