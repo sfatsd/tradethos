@@ -16,7 +16,11 @@ from pathlib import Path
 scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(scripts_dir))
 
-from basket_utils import watchlist_to_basket_dict
+from basket_utils import (
+    iter_watchlist_baskets,
+    parse_watchlists_json,
+    watchlist_to_basket_dict,
+)
 
 
 def find_baskets_dir() -> Path:
@@ -71,21 +75,16 @@ def main():
 
     if args.watchlists_json:
         try:
-            wl_list = json.loads(args.watchlists_json)
-            if isinstance(wl_list, dict) and "watchlists" in wl_list:
-                wl_list = wl_list["watchlists"]
-            for wl in wl_list:
-                desc = wl.get("display_description", "")
-                if not desc or "{" not in desc:
-                    continue
-                name = wl.get("display_name", "Unknown")
-                b_dict = watchlist_to_basket_dict(name, desc)
-                summary = summarize_basket(b_dict)
-                summary["slug"] = b_dict["slug"]
-                summaries.append(summary)
-        except json.JSONDecodeError as e:
+            wl_list = parse_watchlists_json(args.watchlists_json)
+        except (json.JSONDecodeError, ValueError) as e:
             print(f"Error parsing --watchlists-json: {e}", file=sys.stderr)
             sys.exit(1)
+
+        for name, desc, _metadata in iter_watchlist_baskets(wl_list):
+            b_dict = watchlist_to_basket_dict(name, desc)
+            summary = summarize_basket(b_dict)
+            summary["slug"] = b_dict["slug"]
+            summaries.append(summary)
     else:
         basket_files = sorted(p for p in BASKETS_DIR.glob("*.json") if p.name != ".gitkeep")
         if not basket_files:

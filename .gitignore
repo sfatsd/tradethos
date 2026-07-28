@@ -5,3 +5,6 @@ data/baskets/*.json
 # Python cache
 __pycache__/
 *.pyc
+
+# Local agent settings (machine-specific)
+.claude/settings.local.json

@@ -1,5 +1,7 @@
 # Tradethos 📈
 
+[![tests](https://github.com/sfatsd/tradethos/actions/workflows/tests.yml/badge.svg)](https://github.com/sfatsd/tradethos/actions/workflows/tests.yml)
+
 **Tradethos** is a multi-platform agent plugin for building and tracking custom stock baskets, user-defined indexes, and ETF-style portfolios. It uses the Robinhood Model Context Protocol (MCP) for market data and brokerage workflows.
 
 Works with [Claude Code](#claude-code), [Cursor](#cursor), and [Codex](#codex).
@@ -50,7 +52,14 @@ tradethos/
 ├── skills/                           # Single source of truth for all skills
 │   ├── basket-manager/
 │   │   ├── SKILL.md
-│   │   └── examples/sample_basket.json
+│   │   ├── examples/sample_basket.json
+│   │   └── scripts/                  # Stdlib-only basket utilities
+│   │       ├── basket_utils.py       # Z64 encode/decode, snapshots, recovery
+│   │       ├── basket_summary.py
+│   │       ├── calc_drift.py
+│   │       ├── calc_performance.py
+│   │       ├── list_symbols.py
+│   │       └── migrate_to_watchlists.py
 │   ├── stock-researcher/
 │   │   ├── SKILL.md
 │   │   └── references/research_workflow.md
@@ -63,12 +72,19 @@ tradethos/
 │   └── stock-screener/
 │       ├── SKILL.md
 │       └── references/filter_guide.md
+├── tests/                            # Unit tests (python3 -m unittest)
 ├── data/
-│   └── baskets/                      # Local basket JSON files (gitignored)
+│   └── baskets/                      # Legacy local basket JSON files (gitignored)
 ├── config.json                       # Shared defaults and thresholds
 ├── AGENTS.md                         # Project rules & safety guidelines
 ├── LICENSE
 └── README.md
+```
+
+Run the tests from the repo root:
+
+```bash
+python3 -m unittest discover -s tests
 ```
 
 ---
@@ -179,6 +195,11 @@ Simply interact with your AI agent naturally:
 - **Explicit User Confirmation**: All order execution (`place_equity_order`), cancellations, and watchlist modifications require explicit user approval.
 - **Simulated Order Reviews**: Orders are automatically run through `review_equity_order` to display estimated cost, purchasing power, and warnings before placement.
 - **Idempotency**: Orders generate unique client UUIDs (`ref_id`) to prevent accidental duplicate orders on transport retries.
+
+> **How these are enforced**: Tradethos is a skills package — these rails are instructions the
+> agent follows, not code that intercepts calls. Nothing in this repo can mechanically prevent
+> `place_equity_order` from being invoked without a prior review. Treat them as strong defaults,
+> and use your platform's own permission prompts as the hard backstop for order placement.
 
 See [AGENTS.md](AGENTS.md) for the full project rules.
 
