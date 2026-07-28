@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "skills" / "basket-manager" / "scripts"))
 
 from basket_events import make_event
-from basket_store import replay, slugify, snapshot_dict
+from basket_store import Position, replay, slugify, snapshot_dict
 
 
 def created(slug="mag7", name="Magnificent 7", **kw):
@@ -240,6 +240,44 @@ class TestSnapshotDict(unittest.TestCase):
     def test_a_holding_without_a_position_is_null(self):
         data = snapshot_dict(replay([created(), holding()]).baskets["mag7"])
         self.assertIsNone(data["holdings"][0]["position"])
+
+
+class TestOversellClamping(unittest.TestCase):
+
+    def test_position_sell_returns_the_uncovered_share_count(self):
+        position = Position()
+        position.buy(10.0, 50.0)
+        oversold = position.sell(15.0, 70.0)
+        self.assertEqual(oversold, 5.0)
+        self.assertEqual(position.shares, 0.0)
+        self.assertEqual(position.realized_pnl, 200.0)
+
+    def test_position_sell_returns_zero_when_fully_covered(self):
+        position = Position()
+        position.buy(10.0, 50.0)
+        oversold = position.sell(10.0, 70.0)
+        self.assertEqual(oversold, 0.0)
+
+    def test_replay_records_an_oversell_in_clamped(self):
+        events = [created(), holding(),
+                  buy(shares=10.0, price=50.0, order_id="o1"),
+                  sell(shares=999.0, price=70.0, order_id="o2")]
+        for number, event in enumerate(events, start=1):
+            event["_line"] = number
+        result = replay(events)
+        self.assertEqual(len(result.clamped), 1)
+        entry = result.clamped[0]
+        self.assertEqual(entry["slug"], "mag7")
+        self.assertEqual(entry["symbol"], "NVDA")
+        self.assertEqual(entry["requested"], 999.0)
+        self.assertEqual(entry["oversold"], 989.0)
+        self.assertEqual(entry["line"], 4)
+
+    def test_a_fully_covered_sell_leaves_clamped_empty(self):
+        result = replay([created(), holding(),
+                         buy(shares=10.0, price=50.0, order_id="o1"),
+                         sell(shares=10.0, price=70.0, order_id="o2")])
+        self.assertEqual(result.clamped, [])
 
 
 if __name__ == "__main__":
