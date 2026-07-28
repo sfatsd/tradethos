@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unit tests for basket_utils.py module."""
 
+import datetime
 import json
 import sys
 import unittest
@@ -21,6 +22,73 @@ from basket_utils import (
     update_basket_watchlist_baseline,
     watchlist_to_basket_dict,
 )
+
+# Verbatim shapes captured from live Robinhood MCP responses. Trimmed to the
+# fields under test, but keys, nesting, and value formats are unmodified —
+# earlier synthetic fixtures guessed all three wrong.
+REAL_WATCHLISTS_RESPONSE = {
+    "data": {
+        "watchlists": [
+            {
+                "id": "25559e16-14cf-43d3-8d85-e21feb9c9e88",
+                "display_name": "My First List",
+                "icon_emoji": "⚡️",
+                "owner_type": "custom",
+                "item_count": 53,
+            },  # note: no display_description key at all
+            {
+                "id": "5f292013-a21a-46d9-82f8-1e2db0e445f5",
+                "display_name": "Basket: Magnificent 7 Index",
+                "display_description": (
+                    "Z64:eJxdzTkLwkAQhuH/MvW47OzslXSLRxpzgCKipBAvUpjGgELwv7tRi2A38DDf28Md"
+                    "Urgdrm1zaY7ntpu4SdOezk9AeEDaQ7GZBUj3pIVKUAppvTWopBfENUK+WqzHyk47ZE+C"
+                    "KWoI1XKsWhtCVhSvqFlZZn+cMDL5ODM857vip/4TJtKomIWxQ3i+DmNVHKetdN/wqppu"
+                    "R0pKGSSywrj6hdBBSs5rLxNj5esNnzk7tA=="
+                ),
+                "icon_emoji": "🧺",
+                "owner_type": "custom",
+                "item_count": 7,
+            },
+            {
+                "id": "6be1e64d-242f-4ed2-957f-ad49dcdee5d4",
+                "display_name": "Test 250 Char Limit Basket",
+                # Legacy uncompressed metadata still live in the account.
+                "display_description": (
+                    '{"s":"test-250","w":{"AAPL":[10,1,100],"MSFT":[10,1,200]}}'
+                ),
+                "icon_emoji": "🧪",
+                "owner_type": "custom",
+            },
+        ]
+    }
+}
+
+# A real dollar-based market order. Note quantity IS populated once filled,
+# average_price differs from price, and created_at/last_transaction_at differ
+# by two days with 5- and 3-digit fractional seconds respectively.
+REAL_FILLED_ORDER = {
+    "id": "6a6427a8-f5e3-42d2-9494-9de4b2537893",
+    "symbol": "NVDA",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.048067",
+    "cumulative_quantity": "0.048067",
+    "price": "206.800000",
+    "stop_price": None,
+    "average_price": "208.040000",
+    "fees": "0.000000",
+    "dollar_based_amount": {"amount": "10.000000", "currency_code": "USD"},
+    "placed_agent": "agentic",
+    "created_at": "2026-07-25T03:04:08.24711Z",
+    "last_transaction_at": "2026-07-27T13:30:01.764Z",
+    "executions": [{
+        "id": "6a675d59-a896-474d-a3ec-99246bb68ccb",
+        "price": "208.040000",
+        "quantity": "0.048067",
+        "timestamp": "2026-07-27T13:30:01.764Z",
+    }],
+}
 
 
 class TestBasketUtils(unittest.TestCase):
@@ -213,7 +281,10 @@ class TestOrderParsing(unittest.TestCase):
         self.assertEqual(holdings["WDC"]["shares"], 2.5)
         self.assertEqual(holdings["WDC"]["avg_cost"], 50.0)
 
-    def test_null_average_price_falls_back_to_price(self):
+    def test_null_average_price_does_not_fall_back_to_limit_price(self):
+        # `price` is the limit/reference price, not the fill price — in live data
+        # the two differ. Booking cost basis at the limit price is silently wrong,
+        # so an order with no fill price and no executions must be skipped instead.
         orders = [{
             "symbol": "WDC",
             "state": "filled",
@@ -223,8 +294,7 @@ class TestOrderParsing(unittest.TestCase):
             "price": "25.00",
         }]
 
-        holdings = reconstruct_basket_positions(orders, basket_symbols=["WDC"])
-        self.assertEqual(holdings["WDC"]["total_cost"], 100.0)
+        self.assertEqual(reconstruct_basket_positions(orders, basket_symbols=["WDC"]), {})
 
     def test_zero_quantity_order_is_skipped(self):
         orders = [{"symbol": "WDC", "state": "filled", "side": "buy", "quantity": None}]
@@ -333,6 +403,106 @@ class TestWatchlistParsing(unittest.TestCase):
     def test_parse_watchlists_json_rejects_non_list(self):
         with self.assertRaises(ValueError):
             parse_watchlists_json('{"unexpected": "shape"}')
+
+    def test_parse_watchlists_json_rejects_symbol_list(self):
+        with self.assertRaises(ValueError):
+            parse_watchlists_json('["AAPL", "MSFT"]')
+
+
+class TestRealMCPShapes(unittest.TestCase):
+    """Tests bound to payloads captured from the live Robinhood MCP server."""
+
+    def test_parses_real_get_watchlists_envelope(self):
+        # get_watchlists returns {"data": {"watchlists": [...]}} — double-nested.
+        # Handling only a top-level "watchlists" key rejects the real response.
+        parsed = parse_watchlists_json(json.dumps(REAL_WATCHLISTS_RESPONSE))
+        self.assertEqual(len(parsed), 3)
+
+        baskets = list(iter_watchlist_baskets(parsed))
+        names = [name for name, _, _ in baskets]
+        self.assertIn("Basket: Magnificent 7 Index", names)
+        self.assertIn("Test 250 Char Limit Basket", names)   # legacy raw JSON
+        self.assertNotIn("My First List", names)             # no description key
+
+    def test_real_basket_metadata_decodes(self):
+        _, desc, metadata = next(
+            b for b in iter_watchlist_baskets(REAL_WATCHLISTS_RESPONSE["data"]["watchlists"])
+            if b[0] == "Basket: Magnificent 7 Index"
+        )
+        self.assertEqual(metadata["slug"], "magnificent-7-index")
+        self.assertEqual(len(metadata["weights"]), 7)
+        self.assertIsNotNone(metadata["snapshot"])
+        self.assertAlmostEqual(metadata["snapshot"]["h"]["NVDA"][0], 0.06865)
+
+        # 240 of 256 with 7 symbols: capacity is nearly exhausted in production.
+        self.assertLessEqual(len(desc), 256)
+        self.assertGreater(len(desc), 200)
+
+    def test_real_order_uses_fill_price_not_limit_price(self):
+        # average_price 208.04 is the fill; price 206.80 is the limit/reference.
+        holdings = reconstruct_basket_positions([REAL_FILLED_ORDER], ["NVDA"])
+        self.assertAlmostEqual(holdings["NVDA"]["avg_cost"], 208.04, places=2)
+
+    def test_real_order_filters_on_fill_time_not_creation(self):
+        # Created 2026-07-25, filled 2026-07-27. A snapshot taken on the 26th
+        # must still pick this order up — filtering on created_at loses it.
+        snapshot = {"ts": "2026-07-26T00:00:00Z", "h": {}}
+        holdings = reconstruct_basket_positions([REAL_FILLED_ORDER], ["NVDA"], snapshot=snapshot)
+        self.assertIn("NVDA", holdings)
+        self.assertAlmostEqual(holdings["NVDA"]["shares"], 0.048067)
+
+        # A snapshot after the fill must exclude it.
+        after = {"ts": "2026-07-28T00:00:00Z", "h": {}}
+        self.assertEqual(reconstruct_basket_positions([REAL_FILLED_ORDER], ["NVDA"], after), {})
+
+    def test_real_timestamp_precisions_parse(self):
+        # Live data carries 2-, 3-, 5-, and 6-digit fractional seconds.
+        for ts in ("2026-07-23T19:25:52.76Z", "2026-07-27T13:30:01.764Z",
+                   "2026-07-25T03:04:08.24711Z", "2026-07-23T19:26:38.870797Z"):
+            order = dict(REAL_FILLED_ORDER, last_transaction_at=ts)
+            snapshot = {"ts": "2020-01-01T00:00:00Z", "h": {}}
+            holdings = reconstruct_basket_positions([order], ["NVDA"], snapshot=snapshot)
+            self.assertIn("NVDA", holdings, f"failed to parse {ts}")
+
+    def test_price_falls_back_to_executions_not_limit_price(self):
+        order = dict(REAL_FILLED_ORDER, average_price=None)
+        holdings = reconstruct_basket_positions([order], ["NVDA"])
+        # From executions (208.04), never the 206.80 limit price.
+        self.assertAlmostEqual(holdings["NVDA"]["avg_cost"], 208.04, places=2)
+
+    def test_order_with_no_usable_price_is_skipped(self):
+        order = dict(REAL_FILLED_ORDER, average_price=None, executions=[])
+        self.assertEqual(reconstruct_basket_positions([order], ["NVDA"]), {})
+
+
+class TestSnapshotBoundary(unittest.TestCase):
+
+    def test_baseline_ts_rounds_up_so_its_own_fill_is_not_replayed(self):
+        desc = encode_watchlist_metadata("t", {"WDC": 100.0})
+        fill_ts = 1721861640.7
+        updated = update_basket_watchlist_baseline(desc, "WDC", "buy", 10.0, 50.0, timestamp=fill_ts)
+        snapshot = decode_watchlist_metadata(updated)["snapshot"]
+
+        order = {
+            "symbol": "WDC", "state": "filled", "side": "buy",
+            "cumulative_quantity": "10", "average_price": "50.00",
+            "last_transaction_at": datetime.datetime.fromtimestamp(
+                fill_ts, tz=datetime.timezone.utc).isoformat(),
+        }
+        replayed = reconstruct_basket_positions([order], ["WDC"], snapshot=snapshot)
+        # Must stay at 10 shares / $500 — not 20 / $1000.
+        self.assertEqual(replayed["WDC"]["shares"], 10.0)
+        self.assertEqual(replayed["WDC"]["total_cost"], 500.0)
+
+    def test_unparseable_snapshot_ts_raises_instead_of_replaying_everything(self):
+        snapshot = {"ts": "2024-07-24 00:00:00 UTC", "h": {"WDC": [10.0, 50.0]}}
+        order = {
+            "symbol": "WDC", "state": "filled", "side": "buy",
+            "cumulative_quantity": "10", "average_price": "50.00",
+            "last_transaction_at": "2020-01-01T00:00:00Z",
+        }
+        with self.assertRaises(ValueError):
+            reconstruct_basket_positions([order], ["WDC"], snapshot=snapshot)
 
 
 if __name__ == "__main__":

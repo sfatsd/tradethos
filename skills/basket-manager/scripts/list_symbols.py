@@ -17,6 +17,7 @@ scripts_dir = Path(__file__).resolve().parent
 sys.path.insert(0, str(scripts_dir))
 
 from basket_utils import (
+    MAX_SLUG_LENGTH,
     iter_watchlist_baskets,
     parse_watchlists_json,
     watchlist_to_basket_dict,
@@ -75,7 +76,9 @@ def main():
         for name, desc, _metadata in iter_watchlist_baskets(wl_list):
             b_dict = watchlist_to_basket_dict(name, desc)
             slug = b_dict["slug"]
-            if args.basket and slug != args.basket:
+            # Stored slugs are truncated to MAX_SLUG_LENGTH, so compare the
+            # user's slug truncated the same way or the lookup never matches.
+            if args.basket and slug != args.basket[:MAX_SLUG_LENGTH]:
                 continue
             symbols = [h["symbol"] for h in b_dict["holdings"]]
             baskets_data[slug] = {

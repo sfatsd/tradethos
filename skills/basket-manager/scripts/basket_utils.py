@@ -11,6 +11,7 @@ Provides helper functions for:
 import base64
 import datetime
 import json
+import math
 import re
 import time
 import zlib
@@ -77,6 +78,32 @@ def _first_number(order: Dict[str, Any], *keys: str) -> float:
     return 0.0
 
 
+def _order_fill_price(order: Dict[str, Any]) -> float:
+    """Return the per-share price an order actually filled at.
+
+    Prefers `average_price`, then a quantity-weighted mean of `executions`.
+    Deliberately does NOT fall back to `price`: on a Robinhood order that field
+    is the limit/reference price, not the fill price, and the two differ in live
+    data (e.g. NVDA price 206.80 vs average_price 208.04). Using it would book a
+    wrong cost basis, which is worse than skipping the order.
+    """
+    price = _first_number(order, "average_price")
+    if price > 0:
+        return price
+
+    total_qty = 0.0
+    total_cost = 0.0
+    for execution in order.get("executions") or []:
+        if not isinstance(execution, dict):
+            continue
+        exec_qty = _first_number(execution, "quantity")
+        exec_price = _first_number(execution, "price")
+        if exec_qty > 0 and exec_price > 0:
+            total_qty += exec_qty
+            total_cost += exec_qty * exec_price
+    return total_cost / total_qty if total_qty > 0 else 0.0
+
+
 def encode_watchlist_metadata(
     slug: str,
     target_weights: Dict[str, float],
@@ -86,8 +113,13 @@ def encode_watchlist_metadata(
 ) -> str:
     """Encode basket metadata into zlib-compressed Base64 display_description string.
 
-    Uses zlib compression + Base64 encoding ('Z64:') to pack up to 30+ symbols
-    into Robinhood's 256-character display_description limit.
+    Uses zlib compression + Base64 encoding ('Z64:') to pack basket metadata into
+    Robinhood's 256-character display_description limit.
+
+    Capacity depends heavily on whether a holdings snapshot is present. Weights
+    alone compress to 30+ symbols, but each snapshot entry costs roughly 20 more
+    characters: a live 7-symbol basket with full snapshot measures 240 of 256.
+    Budget for ~10 symbols once positions exist, and expect ValueError beyond that.
 
     Args:
         slug: Basket slug identifier.
@@ -236,22 +268,44 @@ def decode_watchlist_metadata(display_description: Optional[str]) -> Optional[Di
     return data
 
 
+def unwrap_payload(data: Any, *keys: str) -> Any:
+    """Peel MCP response envelopes off a payload.
+
+    get_watchlists and get_equity_orders both return {"data": {"<key>": [...]}},
+    so unwrap "data" first, then the named list key. A bare list passes through.
+    """
+    if isinstance(data, dict) and "data" in data:
+        data = data["data"]
+    if isinstance(data, dict):
+        for key in keys:
+            if key in data:
+                return data[key]
+    return data
+
+
 def parse_watchlists_json(raw: str) -> List[Dict[str, Any]]:
     """Parse a --watchlists-json CLI argument into a list of watchlist dicts.
 
-    Accepts either a bare JSON array or the {'watchlists': [...]} envelope
-    returned by get_watchlists.
+    Accepts the raw get_watchlists response ({"data": {"watchlists": [...]}}),
+    a bare {"watchlists": [...]} / {"results": [...]} envelope, or a plain array.
+    Non-dict elements are dropped so a stray symbol list fails loudly here rather
+    than as an AttributeError deeper in.
 
     Raises:
         json.JSONDecodeError: If the argument is not valid JSON.
-        ValueError: If the payload is not a list of watchlists.
+        ValueError: If the payload is not a list of watchlist objects.
     """
-    data = json.loads(raw)
-    if isinstance(data, dict) and "watchlists" in data:
-        data = data["watchlists"]
+    data = unwrap_payload(json.loads(raw), "watchlists", "results")
     if not isinstance(data, list):
         raise ValueError(
-            "Expected a JSON array of watchlists or an object with a 'watchlists' key"
+            "Expected a list of watchlists — pass the get_watchlists response "
+            "({'data': {'watchlists': [...]}}), a {'watchlists': [...]} envelope, "
+            "or a bare JSON array"
+        )
+    if data and not any(isinstance(item, dict) for item in data):
+        raise ValueError(
+            "Expected watchlist objects, got a list of "
+            f"{type(data[0]).__name__} — did you pass a symbol list by mistake?"
         )
     return data
 
@@ -262,9 +316,12 @@ def iter_watchlist_baskets(
     """Yield (display_name, display_description, metadata) for basket-bearing watchlists.
 
     Watchlists whose description carries no decodable basket metadata are skipped,
-    so ordinary (non-basket) watchlists pass through harmlessly.
+    so ordinary (non-basket) watchlists pass through harmlessly. Robinhood omits
+    display_description entirely on lists that have never had one set.
     """
     for wl in watchlists:
+        if not isinstance(wl, dict):
+            continue
         desc = wl.get("display_description") or ""
         metadata = decode_watchlist_metadata(desc)
         if not metadata:
@@ -313,6 +370,13 @@ def reconstruct_basket_positions(
     snapshot_ts = None
     if snapshot:
         snapshot_ts = _to_epoch(snapshot.get("ts"))
+        if snapshot.get("ts") is not None and snapshot_ts is None:
+            # Falling through with snapshot_ts=None would disable the cutoff and
+            # replay the entire order history on top of a populated baseline.
+            raise ValueError(
+                f"Snapshot timestamp {snapshot.get('ts')!r} could not be parsed; "
+                "refusing to replay orders without a cutoff (this would double-count)."
+            )
         snap_holdings = snapshot.get("h", {})
         for sym, detail in snap_holdings.items():
             if not basket_symbols or sym in basket_symbols:
@@ -343,14 +407,17 @@ def reconstruct_basket_positions(
         if basket_symbols and symbol not in basket_symbols:
             continue
 
-        # If a snapshot timestamp exists, skip orders created before or at snapshot timestamp
-        created_ts = _to_epoch(order.get("created_at"))
-        if snapshot_ts and created_ts is not None and created_ts <= snapshot_ts:
+        # Skip orders that filled at or before the snapshot. Use the fill time, not
+        # created_at: a limit order can be created days before it fills (observed
+        # live: created 2026-07-25, filled 2026-07-27), and filtering on creation
+        # silently drops fills that happened after the snapshot was taken.
+        filled_ts = _to_epoch(order.get("last_transaction_at")) or _to_epoch(order.get("created_at"))
+        if snapshot_ts and filled_ts is not None and filled_ts <= snapshot_ts:
             continue
 
-        qty = _first_number(order, "quantity", "cumulative_quantity")
-        price = _first_number(order, "average_price", "price")
-        if qty <= 0:
+        qty = _first_number(order, "cumulative_quantity", "quantity")
+        price = _order_fill_price(order)
+        if qty <= 0 or price <= 0:
             continue
 
         side = (order.get("side") or "").lower()
@@ -432,7 +499,11 @@ def update_basket_watchlist_baseline(
     snap_h[symbol] = [round(new_shares, 6), round(new_avg_cost, 4)]
     now_ts = timestamp or time.time()
 
-    new_snapshot = {"ts": int(now_ts), "h": snap_h}
+    # Round the stored second UP. Flooring puts the snapshot marginally *before*
+    # the fill that produced it, so replaying that same order would apply it a
+    # second time. Robinhood fill timestamps carry sub-second precision, so this
+    # is reachable on any fill that lands mid-second.
+    new_snapshot = {"ts": math.ceil(now_ts), "h": snap_h}
     return encode_watchlist_metadata(
         slug=slug,
         target_weights=target_weights,

@@ -38,7 +38,8 @@ Baskets are stored cloud-natively as Robinhood Watchlists:
 - **Cloud-Native Robinhood Watchlists**:
    - Stored directly on Robinhood using `create_watchlist`, `update_watchlist`, and `get_watchlists`.
    - **Watchlist Name**: `Basket: <Display Name>` (e.g. `Basket: Storage Leaders`).
-   - **Metadata Description**: Target weights, threshold, and baseline snapshots encoded in `display_description` using `zlib` Base64 compression (`Z64:...`) via `basket_utils.py` (tripling capacity up to 30+ symbols under Robinhood's 256-character limit).
+   - **Metadata Description**: Target weights, threshold, and baseline snapshots encoded in `display_description` using `zlib` Base64 compression (`Z64:...`) via `basket_utils.py`, under Robinhood's 256-character limit.
+   - **Capacity**: weights alone compress to 30+ symbols, but each holding in the baseline snapshot costs ~20 more characters. A 7-symbol basket with a full snapshot measures **240 of 256**. Treat ~10 positioned symbols as the practical ceiling, and warn the user before adding holdings to a basket that is already near it — `encode_watchlist_metadata` raises `ValueError` rather than emitting a payload Robinhood would reject.
    - **Position Tracking (Primary)**: Holdings, cost basis, and total invested amounts are read from the baseline snapshot stored in `Z64:` metadata. Baseline snapshots are updated in-place after trade fills via `update_basket_watchlist_baseline` so metadata length never grows.
    - **Position Recovery (Fallback)**: If a baseline snapshot update fails or data appears inconsistent, `reconstruct_basket_positions(orders, basket_symbols, snapshot)` replays filled orders from `get_equity_orders` after the snapshot timestamp to rebuild accurate positions. Always pass the basket's snapshot to avoid double-counting stocks that appear in multiple baskets.
 
@@ -224,7 +225,12 @@ user confirmation before the MCP call.**
 Cloud baskets store a running `shares`/`avg_cost` snapshot rather than a transaction log.
 1. Fetch the Watchlist via `get_watchlists`
 2. Compute the new description with
-   `update_basket_watchlist_baseline(display_description, symbol, side, shares, price)`
+   `update_basket_watchlist_baseline(display_description, symbol, side, shares, price)`.
+   This raises `ValueError` if the basket has outgrown the 256-char limit — if that
+   happens the trade has already filled, so tell the user plainly that the fill
+   succeeded but could not be recorded, and that the basket needs fewer symbols.
+   Pass the **fill** price (`average_price`), never the order's `price` field, which
+   is the limit/reference price and differs from what actually executed.
 3. Confirm with the user, then call `update_watchlist`
 4. **Verify**: re-fetch and decode to confirm the snapshot persisted; report the new position
 5. **If the update fails or looks wrong**: rebuild with
@@ -254,12 +260,18 @@ The examples below use `$SCRIPTS` for that directory.
 
 ### Input modes
 
-Every script accepts either input mode:
+- `--watchlists-json '<json>'` — **primary**, supported by all four scripts. Pass the
+  `get_watchlists` response through unchanged: it arrives double-nested as
+  `{"data": {"watchlists": [...]}}`, and the scripts unwrap that themselves (a bare array
+  or a `{"watchlists": …}` / `{"results": …}` envelope also work). Watchlists without
+  decodable basket metadata are skipped, so passing the user's full list is fine — note
+  Robinhood omits `display_description` entirely on lists that never had one.
+- `--basket <slug>` — local `data/baskets/*.json` files (legacy/migration). Supported by
+  `list_symbols.py`, `calc_performance.py`, and `calc_drift.py`. **Not** `basket_summary.py`.
+- `--all` — all local basket files. Supported by `calc_performance.py` and `calc_drift.py`
+  only. **Not** `list_symbols.py` or `basket_summary.py`.
 
-- `--watchlists-json '<json>'` — **primary**. Pass the raw output of `get_watchlists`
-  (either a bare array or the `{"watchlists": [...]}` envelope). Entries without decodable
-  basket metadata are skipped, so passing the full watchlist list is fine.
-- `--basket <slug>` / `--all` — reads local `data/baskets/*.json` files (legacy/migration).
+When in doubt, run the script with `--help` rather than assuming a flag exists.
 
 ### `$SCRIPTS/list_symbols.py` — Extract symbols from baskets
 ```bash
@@ -283,6 +295,11 @@ python3 "$SCRIPTS/calc_performance.py" --basket <slug> --prices '{...}' --format
 
 ### `$SCRIPTS/calc_drift.py` — Weight drift analysis for rebalancing
 Threshold precedence: explicit `--threshold` → per-basket `rebalance_threshold_pct` → `config.json` → 5.0.
+
+Note the `config.json` tier only applies to **local basket files that omit the field**.
+Cloud baskets always carry a threshold once decoded (defaulting to 5.0), so
+`rebalancing.default_threshold_pct` never takes effect for them — pass `--threshold`
+explicitly if the user wants a different value applied to a watchlist-backed basket.
 ```bash
 python3 "$SCRIPTS/calc_drift.py" --watchlists-json '<get_watchlists output>' \
   --prices '{"WDC":560.00,"STX":920.00,"MU":985.19}'
