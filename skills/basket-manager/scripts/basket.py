@@ -453,6 +453,203 @@ def cmd_delete(args, store):
     return {"deleted": args.slug}
 
 
+def orders_from_response(payload):
+    """Return {order_id: order} from a get_equity_orders response.
+
+    The live response nests the list under a `data` key. A bare list and a
+    single-level envelope also work.
+    """
+    try:
+        data = json.loads(payload)
+    except ValueError as error:
+        raise CliError("The --orders-json value is not valid JSON: %s" % error,
+                       "BAD_ORDERS_JSON", {})
+
+    if isinstance(data, dict) and "data" in data:
+        data = data["data"]
+    if isinstance(data, dict):
+        for key in ("orders", "results"):
+            if key in data:
+                data = data[key]
+                break
+    if not isinstance(data, list):
+        raise CliError(
+            "Expected a list of orders. Pass the get_equity_orders response.",
+            "BAD_ORDERS_JSON", {})
+
+    index = {}
+    for entry in data:
+        if isinstance(entry, dict) and entry.get("id"):
+            index[entry["id"]] = entry
+    return index
+
+
+def _order_shares(order):
+    """Return the filled share count of an order."""
+    for key in ("cumulative_quantity", "quantity"):
+        raw = order.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value
+    return 0.0
+
+
+def _order_price(order):
+    """Return the fill price of an order.
+
+    The tool reads `average_price`. It never reads `price`, which holds the
+    limit price. A weighted mean of the executions is the only fallback.
+    """
+    raw = order.get("average_price")
+    if raw not in (None, ""):
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+    total_shares = 0.0
+    total_cost = 0.0
+    for execution in order.get("executions") or []:
+        if not isinstance(execution, dict):
+            continue
+        try:
+            shares = float(execution.get("quantity") or 0)
+            price = float(execution.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if shares > 0 and price > 0:
+            total_shares += shares
+            total_cost += shares * price
+    return total_cost / total_shares if total_shares > 0 else 0.0
+
+
+def cmd_record_fills(args, store):
+    order_ids = [i.strip() for i in args.order_ids.split(",") if i.strip()]
+    if not order_ids:
+        raise CliError("No order ids given", "NO_ORDER_IDS", {})
+    if args.cap_at_held and len(order_ids) != 1:
+        raise CliError(
+            "--cap-at-held needs exactly one order id, but %d were given"
+            % len(order_ids), "CAP_NEEDS_ONE_ORDER", {"count": len(order_ids)})
+
+    index = orders_from_response(args.orders_json)
+
+    with store.log.locked():
+        result, basket = store.require(args.slug)
+
+        if basket.account_number and args.account != basket.account_number:
+            raise CliError(
+                "The basket uses account %s, but the orders came from %s"
+                % (basket.account_number, args.account),
+                "ACCOUNT_MISMATCH",
+                {"basket_account": basket.account_number, "given": args.account})
+
+        events = []
+        recorded = []
+        already = []
+        skipped = []
+        capped = []
+        # Track shares within this batch so two sells in one call cannot
+        # oversell the same holding, and a buy earlier in the batch can fund
+        # a sell later in it.
+        pending = dict((s, h.position.shares) for s, h in basket.holdings.items())
+
+        for order_id in order_ids:
+            order = index.get(order_id)
+            if order is None:
+                skipped.append({"order_id": order_id,
+                                "reason": "ORDER_NOT_IN_RESPONSE"})
+                continue
+            if order.get("state") != "filled":
+                skipped.append({"order_id": order_id, "reason": "NOT_FILLED",
+                                "state": order.get("state")})
+                continue
+
+            owner = result.order_index.get(order_id)
+            if owner == args.slug:
+                already.append(order_id)
+                continue
+            if owner is not None:
+                # Skip, do not abort. A batch keeps its good fills; the exit
+                # code table gives exit 1 only when nothing was recorded at
+                # all.
+                skipped.append({"order_id": order_id,
+                                "reason": "ORDER_IN_OTHER_BASKET",
+                                "basket": owner})
+                continue
+
+            symbol = (order.get("symbol") or "").upper()
+            if symbol not in basket.holdings:
+                skipped.append({"order_id": order_id, "reason": "SYMBOL_NOT_IN_BASKET",
+                                "symbol": symbol})
+                continue
+
+            shares = _order_shares(order)
+            price = _order_price(order)
+            if shares <= 0 or price <= 0:
+                skipped.append({"order_id": order_id, "reason": "NO_SHARES_OR_PRICE"})
+                continue
+
+            side = (order.get("side") or "").lower()
+            if side not in ("buy", "sell"):
+                skipped.append({"order_id": order_id, "reason": "UNKNOWN_SIDE",
+                                "side": side})
+                continue
+
+            if side == "sell":
+                held = pending.get(symbol, 0.0)
+                if shares > held + 1e-12:
+                    if not args.cap_at_held:
+                        skipped.append({
+                            "order_id": order_id, "reason": "OVERSELL",
+                            "symbol": symbol, "held": held, "requested": shares})
+                        continue
+                    capped.append({"order_id": order_id, "symbol": symbol,
+                                   "order_shares": shares,
+                                   "recorded_shares": held})
+                    shares = held
+                if shares <= 0:
+                    skipped.append({"order_id": order_id, "reason": "OVERSELL",
+                                    "symbol": symbol, "held": held,
+                                    "requested": shares})
+                    continue
+                pending[symbol] = held - shares
+            else:
+                pending[symbol] = pending.get(symbol, 0.0) + shares
+
+            events.append(make_event(
+                side, args.slug, symbol=symbol,
+                shares=shares, price=price, amount=shares * price,
+                order_id=order_id,
+                ts=order.get("last_transaction_at") or order.get("created_at")))
+            recorded.append(order_id)
+
+        if not recorded and not already:
+            raise CliError(
+                "No order was recorded", "NOTHING_RECORDED",
+                {"skipped": skipped})
+
+        if events:
+            store.write(events, {args.slug})
+
+    _, basket = store.require(args.slug)
+    return {
+        "slug": args.slug,
+        "recorded": recorded,
+        "already_recorded": already,
+        "skipped": skipped,
+        "capped": capped,
+        "holdings": snapshot_dict(basket)["holdings"],
+    }
+
+
 # --- output -----------------------------------------------------------------
 
 def print_table(command, payload):
@@ -584,6 +781,14 @@ def build_parser():
     p.add_argument("slug")
     p.add_argument("--force", action="store_true")
     p.set_defaults(func=cmd_delete)
+
+    p = add("record-fills", "Record filled orders")
+    p.add_argument("slug")
+    p.add_argument("--orders-json", required=True)
+    p.add_argument("--order-ids", required=True)
+    p.add_argument("--account", required=True)
+    p.add_argument("--cap-at-held", action="store_true")
+    p.set_defaults(func=cmd_record_fills)
 
     return parser
 

@@ -289,5 +289,208 @@ class TestWeightCommands(CliTestCase):
         self.assertEqual(code, 0, err)
 
 
+def order(order_id="o1", symbol="NVDA", side="buy", quantity="10",
+          average_price="50.00", state="filled", price="49.00"):
+    """Build an order in the shape that get_equity_orders returns."""
+    return {
+        "id": order_id, "symbol": symbol, "side": side, "state": state,
+        "quantity": quantity, "cumulative_quantity": quantity,
+        "price": price, "average_price": average_price,
+        "dollar_based_amount": {"amount": "10.00", "currency_code": "USD"},
+        "created_at": "2026-07-23T19:25:22.952062Z",
+        "last_transaction_at": "2026-07-23T19:25:23.115Z",
+        "executions": [{"price": average_price, "quantity": quantity}],
+    }
+
+
+def orders_response(*orders):
+    return json.dumps({"data": {"orders": list(orders)}})
+
+
+class TestRecordFills(CliTestCase):
+
+    def setUp(self):
+        CliTestCase.setUp(self)
+        self.slug = self.make_basket(name="Trio", symbols="NVDA:50,MSFT:50")
+
+    def record(self, response, ids, account="000000000", *extra):
+        return self.run_cli("record-fills", self.slug, "--orders-json", response,
+                            "--order-ids", ids, "--account", account, *extra)
+
+    def test_records_one_order(self):
+        code, out, err = self.record(orders_response(order()), "o1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["o1"])
+        shown = self.run_cli("show", self.slug)[1]
+        position = [h for h in shown["holdings"] if h["symbol"] == "NVDA"][0]["position"]
+        self.assertEqual(position["shares"], 10.0)
+
+    def test_reads_average_price_not_price(self):
+        code, _, err = self.record(
+            orders_response(order(average_price="208.04", price="206.80")), "o1")
+        self.assertEqual(code, 0, err)
+        shown = self.run_cli("show", self.slug)[1]
+        position = [h for h in shown["holdings"] if h["symbol"] == "NVDA"][0]["position"]
+        self.assertEqual(position["avg_cost"], 208.04)
+
+    def test_records_only_the_listed_ids(self):
+        response = orders_response(order(order_id="mine"),
+                                   order(order_id="theirs", quantity="99"))
+        code, out, err = self.record(response, "mine")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["mine"])
+        shown = self.run_cli("show", self.slug)[1]
+        position = [h for h in shown["holdings"] if h["symbol"] == "NVDA"][0]["position"]
+        self.assertEqual(position["shares"], 10.0)
+
+    def test_reads_the_side_of_each_order(self):
+        buy_then_sell = orders_response(
+            order(order_id="b1", side="buy", quantity="10", average_price="50.00"),
+            order(order_id="s1", side="sell", quantity="4", average_price="70.00"))
+        code, out, err = self.record(buy_then_sell, "b1,s1")
+        self.assertEqual(code, 0, err)
+        shown = self.run_cli("show", self.slug)[1]
+        position = [h for h in shown["holdings"] if h["symbol"] == "NVDA"][0]["position"]
+        self.assertEqual(position["shares"], 6.0)
+        self.assertEqual(position["realized_pnl"], 80.0)
+
+    def test_a_repeated_call_changes_nothing(self):
+        response = orders_response(order())
+        self.record(response, "o1")
+        code, out, err = self.record(response, "o1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["already_recorded"], ["o1"])
+        shown = self.run_cli("show", self.slug)[1]
+        position = [h for h in shown["holdings"] if h["symbol"] == "NVDA"][0]["position"]
+        self.assertEqual(position["shares"], 10.0)
+
+    def test_an_id_in_another_basket_is_skipped(self):
+        other = self.make_basket(name="Other", symbols="NVDA:100")
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("record-fills", other, "--orders-json",
+                                    orders_response(order()), "--order-ids", "o1",
+                                    "--account", "000000000")
+        # Nothing else was in the batch, so nothing was recorded.
+        self.assertEqual(code, 1)
+        self.assertIn("ORDER_IN_OTHER_BASKET", err)
+
+    def test_a_batch_keeps_its_good_fills_when_one_id_is_taken(self):
+        other = self.make_basket(name="Other", symbols="NVDA:50,MSFT:50")
+        self.record(orders_response(order(order_id="taken")), "taken")
+        batch = orders_response(
+            order(order_id="taken"),
+            order(order_id="fresh", symbol="MSFT", quantity="4",
+                  average_price="25.00"))
+        code, out, err = self.run_cli(
+            "record-fills", other, "--orders-json", batch,
+            "--order-ids", "taken,fresh", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["fresh"])
+        reasons = [s["reason"] for s in out["skipped"]]
+        self.assertIn("ORDER_IN_OTHER_BASKET", reasons)
+
+    def test_a_wrong_account_is_refused(self):
+        code, _, err = self.record(orders_response(order()), "o1", "999999")
+        self.assertEqual(code, 1)
+        self.assertIn("ACCOUNT_MISMATCH", err)
+
+    def test_a_mixed_batch_records_the_good_orders(self):
+        self.record(orders_response(order(order_id="b1", quantity="10")), "b1")
+        batch = orders_response(
+            order(order_id="b2", symbol="MSFT", quantity="5", average_price="20.00"),
+            order(order_id="s9", side="sell", quantity="999", average_price="60.00"))
+        code, out, err = self.record(batch, "b2,s9")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["b2"])
+        self.assertEqual(len(out["skipped"]), 1)
+        self.assertEqual(out["skipped"][0]["order_id"], "s9")
+
+    def test_recording_no_order_exits_one(self):
+        batch = orders_response(
+            order(order_id="s9", side="sell", quantity="999", average_price="60.00"))
+        code, _, err = self.record(batch, "s9")
+        self.assertEqual(code, 1)
+        self.assertIn("NOTHING_RECORDED", err)
+
+    def test_an_unfilled_order_is_skipped_then_recorded_later(self):
+        pending = orders_response(order(order_id="p1", state="confirmed"))
+        code, out, _ = self.record(pending, "p1")
+        self.assertEqual(code, 1)
+        filled = orders_response(order(order_id="p1", state="filled"))
+        code, out, err = self.record(filled, "p1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["p1"])
+
+    def test_cap_at_held_records_the_held_shares(self):
+        self.record(orders_response(order(order_id="b1", quantity="10")), "b1")
+        big_sell = orders_response(
+            order(order_id="s1", side="sell", quantity="25", average_price="70.00"))
+        code, _, _ = self.record(big_sell, "s1")
+        self.assertEqual(code, 1)
+        code, out, err = self.record(big_sell, "s1", "000000000", "--cap-at-held")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["capped"][0]["recorded_shares"], 10.0)
+        shown = self.run_cli("show", self.slug)[1]
+        position = [h for h in shown["holdings"] if h["symbol"] == "NVDA"][0]["position"]
+        # Holding.has_position (established in Task 3) is shares > 0, so
+        # snapshot_dict reports a fully sold-out holding as position=None,
+        # the same convention test_show_reports_targets_and_no_position
+        # relies on for a holding that never bought. The brief's literal
+        # assertion here (position["shares"] == 0.0) assumes a "position"
+        # dict survives a full sell-out, which basket_store.py (out of
+        # scope for this task) does not do.
+        self.assertIsNone(position)
+
+    def test_cap_at_held_is_refused_for_more_than_one_id(self):
+        response = orders_response(order(order_id="a"), order(order_id="b"))
+        code, _, err = self.record(response, "a,b", "000000000", "--cap-at-held")
+        self.assertEqual(code, 1)
+        self.assertIn("CAP_NEEDS_ONE_ORDER", err)
+
+    def test_an_unknown_id_is_reported(self):
+        code, _, err = self.record(orders_response(order()), "missing")
+        self.assertEqual(code, 1)
+        self.assertIn("ORDER_NOT_IN_RESPONSE", err)
+
+    def test_remove_holding_refuses_a_held_position(self):
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("remove-holding", self.slug, "--symbol", "NVDA")
+        self.assertEqual(code, 1)
+        self.assertIn("HOLDING_HAS_POSITION", err)
+
+    def test_remove_holding_force_removes_a_held_position(self):
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("remove-holding", self.slug,
+                                    "--symbol", "NVDA", "--force")
+        self.assertEqual(code, 0, err)
+        shown = self.run_cli("show", self.slug)[1]
+        self.assertEqual([h["symbol"] for h in shown["holdings"]], ["MSFT"])
+        self.assertEqual(shown["holdings"][0]["target_weight_pct"], 100)
+
+    def test_delete_refuses_a_basket_that_holds_shares(self):
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("delete", self.slug)
+        self.assertEqual(code, 1)
+        self.assertIn("BASKET_HAS_POSITIONS", err)
+
+    def test_delete_force_removes_the_basket(self):
+        self.record(orders_response(order()), "o1")
+        code, _, err = self.run_cli("delete", self.slug, "--force")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.run_cli("list")[1]["baskets"], [])
+
+    def test_a_zero_target_weight_is_refused(self):
+        code, _, err = self.run_cli("set-weight", self.slug, "--symbol", "NVDA",
+                                    "--weight", "0")
+        self.assertEqual(code, 1)
+        self.assertIn("between 1 and 100", err)
+
+    def test_a_negative_target_weight_is_refused(self):
+        code, _, err = self.run_cli("set-weight", self.slug, "--symbol", "NVDA",
+                                    "--weight", "-5")
+        self.assertEqual(code, 1)
+        self.assertIn("between 1 and 100", err)
+
+
 if __name__ == "__main__":
     unittest.main()
