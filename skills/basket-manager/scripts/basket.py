@@ -70,6 +70,7 @@ class Store(object):
         """Append events, then export the snapshots for the changed baskets."""
         self.log.append(events)
         self.export(slugs)
+        maybe_backup(self)
 
     def export(self, slugs=None):
         """Write the snapshot file for the named baskets, or for all of them."""
@@ -446,6 +447,7 @@ def cmd_delete(args, store):
                 "BASKET_HAS_POSITIONS",
                 {"symbols": held, "total_invested": basket.total_invested})
         store.log.append([make_event("basket_deleted", args.slug)])
+        maybe_backup(store)
 
     path = store.baskets_dir / (args.slug + ".json")
     if path.exists():
@@ -744,6 +746,160 @@ def cmd_record_fills(args, store):
     }
 
 
+BACKUP_EVERY = 20
+MARKER_NAME = "backup.marker"
+BACKUP_DIR_NAME = "backups"
+
+
+def positions_from_response(payload):
+    """Return {symbol: shares} from a get_equity_positions response."""
+    if not payload:
+        return None
+    try:
+        data = json.loads(payload)
+    except ValueError as error:
+        raise CliError("The --positions value is not valid JSON: %s" % error,
+                       "BAD_POSITIONS_JSON", {})
+    if isinstance(data, dict) and "data" in data:
+        data = data["data"]
+    if isinstance(data, dict):
+        for key in ("positions", "results"):
+            if key in data:
+                data = data[key]
+                break
+    if not isinstance(data, list):
+        raise CliError("Expected a list of positions", "BAD_POSITIONS_JSON", {})
+
+    out = {}
+    for entry in data:
+        if not isinstance(entry, dict):
+            continue
+        symbol = (entry.get("symbol") or "").upper()
+        if not symbol:
+            continue
+        try:
+            out[symbol] = float(entry.get("quantity") or 0)
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def read_marker(store):
+    path = store.data_dir / MARKER_NAME
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except ValueError:
+        return None
+
+
+def run_backup(store, to=None):
+    """Copy the log to a timestamped file and update the marker."""
+    if not store.log.path.exists():
+        return None
+    backups = Path(to) if to else store.data_dir / BACKUP_DIR_NAME
+    backups.mkdir(parents=True, exist_ok=True)
+    with store.log.locked():
+        count = store.log.count()
+        stamp = utc_now().replace(":", "").replace("-", "").replace(".", "")
+        target = backups / ("events-%s.jsonl" % stamp)
+        shutil.copyfile(str(store.log.path), str(target))
+    (store.data_dir / MARKER_NAME).write_text(json.dumps({
+        "events": count, "at": utc_now(), "path": str(target)}) + "\n")
+    return target
+
+
+def maybe_backup(store):
+    """Back the log up when it has grown past the threshold."""
+    marker = read_marker(store)
+    count = store.log.count()
+    if marker is None or count - marker.get("events", 0) >= BACKUP_EVERY:
+        run_backup(store)
+        return True
+    return False
+
+
+def cmd_backup(args, store):
+    target = run_backup(store, args.to)
+    if target is None:
+        raise CliError("There is no log to back up", "NO_LOG", {})
+    return {"path": str(target), "events": store.log.count()}
+
+
+def cmd_verify(args, store):
+    result = store.load()          # raises CliError(exit 3) on a corrupt line
+    warnings = []
+
+    if args.slug and args.slug not in result.baskets:
+        raise CliError("No basket has the slug %r" % args.slug,
+                       "BASKET_NOT_FOUND",
+                       {"slug": args.slug, "available": sorted(result.baskets)})
+
+    def wanted(slug):
+        return args.slug is None or slug == args.slug
+
+    ignored = []
+    for entry in result.ignored:
+        if not wanted(entry["slug"]):
+            continue
+        ignored.append(entry)
+        if entry["slug"] != entry["kept_by"]:
+            warnings.append(
+                "Line %s repeats order %s. Basket %s kept it, so basket %s "
+                "lost that claim." % (entry["line"], entry["order_id"],
+                                      entry["kept_by"], entry["slug"]))
+
+    clamped = [c for c in result.clamped if wanted(c["slug"])]
+    for entry in clamped:
+        warnings.append(
+            "Line %s sells %s shares of %s, but basket %s held fewer. The "
+            "replay covered what it could and dropped %s shares."
+            % (entry["line"], entry["requested"], entry["symbol"],
+               entry["slug"], entry["oversold"]))
+
+    marker = read_marker(store)
+    count = store.log.count()
+    if marker is None:
+        warnings.append("No backup marker exists. Run `backup`.")
+    elif count > marker.get("events", 0):
+        warnings.append(
+            "The log holds %d events, but the last backup held %d. Run `backup`."
+            % (count, marker.get("events", 0)))
+
+    positions = positions_from_response(args.positions)
+    rows = None
+    if positions is not None:
+        claims = {}
+        for slug, basket in result.baskets.items():
+            if not wanted(slug):
+                continue
+            for symbol, holding in basket.holdings.items():
+                if holding.has_position:
+                    claims[symbol] = claims.get(symbol, 0.0) + holding.position.shares
+
+        rows = []
+        for symbol in sorted(set(claims) | set(positions)):
+            claimed = claims.get(symbol, 0.0)
+            actual = positions.get(symbol, 0.0)
+            if abs(claimed - actual) < 1e-6:
+                state = "match"
+            elif claimed < actual:
+                state = "outside_shares"
+            else:
+                state = "over_claimed"
+                warnings.append(
+                    "Baskets claim %s shares of %s, but the account holds %s. "
+                    "Section 7.4 of the design gives the repair."
+                    % (claimed, symbol, actual))
+            rows.append({"symbol": symbol, "claimed": round(claimed, 6),
+                         "account": round(actual, 6), "state": state})
+
+    return {"baskets": sorted(s for s in result.baskets if wanted(s)),
+            "events": count, "ignored_events": ignored,
+            "clamped_sells": clamped, "positions": rows, "warnings": warnings}
+
+
 # --- output -----------------------------------------------------------------
 
 def print_table(command, payload):
@@ -897,6 +1053,15 @@ def build_parser():
     group.add_argument("--all", action="store_true")
     p.add_argument("--prices", default="")
     p.set_defaults(func=cmd_plan_sell)
+
+    p = add("verify", "Check the log against the account")
+    p.add_argument("slug", nargs="?", default=None)
+    p.add_argument("--positions", default="")
+    p.set_defaults(func=cmd_verify)
+
+    p = add("backup", "Copy the event log")
+    p.add_argument("--to", default=None)
+    p.set_defaults(func=cmd_backup)
 
     return parser
 

@@ -584,5 +584,135 @@ class TestPlanning(CliTestCase):
         self.assertIn("PRICES_REQUIRED", err)
 
 
+def positions_response(*pairs):
+    rows = [{"symbol": s, "quantity": str(q), "average_buy_price": "50.00"}
+            for s, q in pairs]
+    return json.dumps({"data": {"positions": rows}})
+
+
+class TestVerifyAndBackup(CliTestCase):
+
+    def setUp(self):
+        CliTestCase.setUp(self)
+        self.slug = self.make_basket(name="Pair", symbols="NVDA:60,MSFT:40")
+        response = orders_response(
+            order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"))
+        self.run_cli("record-fills", self.slug, "--orders-json", response,
+                     "--order-ids", "b1", "--account", "000000000")
+
+    def test_claims_equal_position_is_correct(self):
+        code, out, err = self.run_cli(
+            "verify", "--positions", positions_response(("NVDA", 10)))
+        self.assertEqual(code, 0, err)
+        row = [r for r in out["positions"] if r["symbol"] == "NVDA"][0]
+        self.assertEqual(row["state"], "match")
+
+    def test_claims_below_position_is_normal(self):
+        code, out, err = self.run_cli(
+            "verify", "--positions", positions_response(("NVDA", 25)))
+        self.assertEqual(code, 0, err)
+        row = [r for r in out["positions"] if r["symbol"] == "NVDA"][0]
+        self.assertEqual(row["state"], "outside_shares")
+        # A claim below the account position must not add a *position*
+        # warning. setUp's own second write (record-fills) leaves the backup
+        # marker one event stale, which independently and correctly produces
+        # a backup-staleness warning (see test_verify_warns_when_the_backup_
+        # is_stale) - that is unrelated to this check and is not asserted
+        # away here.
+        self.assertFalse(any("Baskets claim" in w for w in out["warnings"]))
+
+    def test_claims_above_position_is_reported(self):
+        code, out, err = self.run_cli(
+            "verify", "--positions", positions_response(("NVDA", 4)))
+        self.assertEqual(code, 0, err)
+        row = [r for r in out["positions"] if r["symbol"] == "NVDA"][0]
+        self.assertEqual(row["state"], "over_claimed")
+        self.assertTrue(out["warnings"])
+
+    def test_verify_without_positions_skips_the_third_check(self):
+        code, out, err = self.run_cli("verify")
+        self.assertEqual(code, 0, err)
+        self.assertIsNone(out["positions"])
+
+    def test_verify_reports_an_ignored_duplicate(self):
+        log = self.data_dir / "events.log.jsonl"
+        lines = log.read_text().splitlines()
+        trade = [l for l in lines if '"type":"buy"' in l][0]
+        with log.open("a") as handle:
+            handle.write(trade + "\n")
+        code, out, err = self.run_cli("verify")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(len(out["ignored_events"]), 1)
+        self.assertEqual(out["ignored_events"][0]["order_id"], "b1")
+
+    def test_a_corrupt_line_exits_three(self):
+        log = self.data_dir / "events.log.jsonl"
+        with log.open("a") as handle:
+            handle.write("{broken\n")
+        code, _, err = self.run_cli("verify")
+        self.assertEqual(code, 3)
+        self.assertIn("CORRUPT_LOG_LINE", err)
+
+    def test_backup_writes_a_copy_and_a_marker(self):
+        code, out, err = self.run_cli("backup")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(Path(out["path"]).exists())
+        marker = json.loads((self.data_dir / "backup.marker").read_text())
+        self.assertGreater(marker["events"], 0)
+
+    def test_verify_warns_when_no_backup_exists(self):
+        # setUp already wrote events, and the first write with no marker runs
+        # a backup by itself. Remove the marker to reach the no-backup path.
+        marker = self.data_dir / "backup.marker"
+        if marker.exists():
+            marker.unlink()
+        out = self.run_cli("verify")[1]
+        self.assertTrue(any("No backup marker" in w for w in out["warnings"]))
+
+    def test_verify_warns_when_the_backup_is_stale(self):
+        self.run_cli("backup")
+        self.run_cli("set-weight", self.slug, "--symbol", "NVDA", "--weight", "70")
+        out = self.run_cli("verify")[1]
+        self.assertTrue(any("last backup held" in w for w in out["warnings"]))
+
+    def test_verify_reports_a_clamped_oversell(self):
+        # A hand-edited log can hold a sale larger than the basket ever held.
+        log = self.data_dir / "events.log.jsonl"
+        buy_line = [l for l in log.read_text().splitlines() if '"type":"buy"' in l][0]
+        bad = buy_line.replace('"type":"buy"', '"type":"sell"')
+        bad = bad.replace('"order_id":"b1"', '"order_id":"bad"')
+        bad = bad.replace('"shares":10.0', '"shares":999.0')
+        with log.open("a") as handle:
+            handle.write(bad + "\n")
+        out = self.run_cli("verify")[1]
+        self.assertTrue(out["clamped_sells"])
+        self.assertTrue(any("dropped" in w for w in out["warnings"]))
+
+    def test_verify_accepts_a_slug(self):
+        code, out, err = self.run_cli("verify", self.slug)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["baskets"], [self.slug])
+
+    def test_backup_honours_the_to_option(self):
+        target = self.data_dir / "elsewhere"
+        code, out, err = self.run_cli("backup", "--to", str(target))
+        self.assertEqual(code, 0, err)
+        self.assertTrue(Path(out["path"]).parent == target)
+
+    def test_verify_stops_warning_after_a_backup(self):
+        self.run_cli("backup")
+        out = self.run_cli("verify")[1]
+        self.assertFalse(any("backup" in w.lower() for w in out["warnings"]))
+
+    def test_the_tool_backs_up_by_itself(self):
+        # The setUp already wrote several events. Drive the count past the
+        # threshold and confirm a backup appeared without an explicit call.
+        for index in range(12):
+            self.run_cli("set-weight", self.slug, "--symbol", "NVDA",
+                         "--weight", str(50 + (index % 5)))
+        backups = list((self.data_dir / "backups").glob("*.jsonl"))
+        self.assertTrue(backups)
+
+
 if __name__ == "__main__":
     unittest.main()
