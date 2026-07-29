@@ -70,7 +70,8 @@ Skip the review step ONLY when the user has **very explicitly** asked to bypass:
        ↓
 5. Confirm: Get explicit user confirmation
        ↓
-6. Execute: place_equity_order. For basket trades, after order fills, update the Watchlist baseline snapshot using update_basket_watchlist_baseline and update_watchlist.
+6. Execute: place_equity_order. Keep the order id. For a basket trade, record it after
+   it fills — see "Recording Basket Transactions" below.
        ↓
 7. Verify: get_equity_orders → confirm order status
 ```
@@ -153,28 +154,44 @@ Skip the review step ONLY when the user has **very explicitly** asked to bypass:
 When the user has custom baskets (from the basket-manager skill):
 
 ### Execute to Target Weights
-1. Fetch the target Watchlist using `get_watchlists` and `watchlist_to_basket_dict`
-2. Use `get_portfolio` to get current buying power
-3. Use `get_equity_positions` to get current holdings
-4. Use `get_equity_quotes` for current prices
-5. Calculate the trades needed to align actual holdings with target weights
-6. Present the trade plan as a table: Symbol, Current Weight, Target Weight, Action (Buy/Sell), Shares, Est. Cost
-7. Get confirmation, then execute each trade in sequence
+1. Load the basket with the basket-manager skill's `basket.py show <slug>`, which gives the
+   target weight and current position for each holding.
+2. Use `get_portfolio` to get current buying power.
+3. Use `get_equity_quotes` for current prices.
+4. Calculate the trades needed to align actual holdings with target weights.
+5. Present the trade plan as a table: Symbol, Current Weight, Target Weight, Action (Buy/Sell), Shares, Est. Cost.
+6. Get confirmation, then execute each trade in sequence. Keep every order id for the
+   recording step below.
 
 ### Dollar-Based Basket Buy
 When the user says "invest $X in my basket":
-1. Fetch the target Watchlist using `get_watchlists` and `watchlist_to_basket_dict`
-2. Divide $X according to target weights
-3. For each holding: calculate dollar allocation → use dollar_amount market orders
-4. Present the plan, get confirmation, execute
+1. Call the basket-manager skill's `basket.py plan-buy <slug> --amount X`, which divides the
+   amount across the target weights. The tool owns this arithmetic; do not compute the split
+   by hand.
+2. For each holding in the plan: use a dollar_amount market order for its allocated amount.
+3. Present the plan, get confirmation, execute. Keep every order id.
 
 ### Recording Basket Transactions
-When a trade is executed **at the basket level** (e.g. "invest $500 in my AI Leaders basket" or "buy 10 shares of WDC for my Storage basket"):
-1. Fetch the target Watchlist using `get_watchlists`.
-2. Compute the updated baseline snapshot after fill using `update_basket_watchlist_baseline`.
-3. Update the Watchlist `display_description` on Robinhood using `update_watchlist`.
-4. **Verify**: Re-fetch the Watchlist via `get_watchlists` and decode the metadata to confirm the snapshot was persisted correctly. Report the updated position to the user.
-5. **If update fails** (network error, API failure, or verification mismatch): use `reconstruct_basket_positions(orders, basket_symbols, snapshot)` with the basket's last-known snapshot from `get_equity_orders` to rebuild positions, then retry the `update_watchlist` call.
+A fill joins a basket through one command: the basket-manager skill's `record-fills`, given
+the order id. This applies whether the trade came from "invest $500 in my AI Leaders basket"
+or from "buy 10 shares of WDC for my Storage basket" — a whole-basket buy and a single-stock
+basket buy both end the same way.
+
+1. After the order fills, call `get_equity_orders` to confirm the fill and read its details.
+2. Call `basket.py record-fills <slug> --order-ids <id[,id...]> --account <account> --orders-json '<the get_equity_orders response>'`.
+   The tool reads the symbol, the filled quantity, and the fill price from the order itself —
+   never type a share count or a price into this call.
+3. Report the result to the user, including any order id the tool skipped and the reason
+   (see the basket-manager skill's "Recording Trades" section for the full list of reasons).
+4. **Pass only the ids of orders placed in this same conversation, for this basket.** An id
+   picked by symbol alone can pull in a trade meant for a different basket, or one the user
+   made outside every basket.
+5. When the user has not named a basket for a fill, offer to record it rather than doing so
+   automatically — see the Skill Coordination rule in `AGENTS.md`.
+
+A limit order that is still open when the fill is first checked just needs the same
+`record-fills` call again later, once `get_equity_orders` shows it filled; a repeated call
+with an already-recorded id changes nothing.
 
 ## Tax-Lot Selling (Advanced)
 

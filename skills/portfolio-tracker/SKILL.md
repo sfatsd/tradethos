@@ -33,18 +33,23 @@ Trigger this skill when the user mentions:
 - **Account Selection**: Never auto-default `account_number` from `get_accounts` — always present available accounts and ask the user to choose or confirm.
 - **Cross-Skill Offers**: Frame rebalancing trades or basket adjustments as optional suggestions/offers, never automatic actions.
 
-## Available Data Sources (Robinhood MCP)
+## Available Data Sources
 
 | Tool / Helper | Purpose |
 |---|---|
 | `get_portfolio` | Account-level value breakdown (equity, options, crypto) and buying power |
 | `get_equity_positions` | Current total account holdings: symbol, quantity, average cost |
 | `get_equity_quotes` | Real-time prices for P&L calculation (includes previous close for day change) |
-| `get_watchlists` | Fetch cloud-native Robinhood Watchlists containing basket target weights in `display_description` |
-| `get_equity_orders` | Order history used by `basket_utils.reconstruct_basket_positions` to attribute holdings/cost basis per basket |
 | `get_pnl_trade_history` | Per-trade realized P&L (chronological, paginated) |
 | `get_realized_pnl` | Aggregate realized P&L over time windows |
 | `get_equity_tax_lots` | Tax-lot level position detail (cost basis per lot) |
+| basket-manager's `basket.py show <slug>` | A basket's target weights, thesis, and per-holding position (shares, average cost, realized profit and loss) |
+| basket-manager's `basket.py verify --positions` | Compares a basket's claimed shares to the real account position; see "Basket Performance" below |
+| basket-manager's `calc_drift.py` | Weight drift per holding against the basket's threshold |
+
+A basket lives in the local event-log store at `~/.tradethos`, not on Robinhood. Reading a
+basket needs no network call; only its live price and its position-check against the account
+do.
 
 ## Core Workflows
 
@@ -96,10 +101,19 @@ When the user asks "how much have I made?" or "show my P&L":
 
 When the user asks "how's my basket doing?" or "show me my Storage basket":
 
-1. Fetch the target Watchlist using `get_watchlists` and decode metadata with `watchlist_to_basket_dict`
-2. Call `get_equity_quotes(symbols=[all holding symbols])` for current prices and previous close
-3. **Consistency check**: Call `get_equity_positions` and compare actual Robinhood shares for basket symbols against the snapshot. If a symbol's actual shares differ significantly from the snapshot (e.g., snapshot says 0 shares but Robinhood shows holdings, or vice versa), warn the user that the basket snapshot may be stale.
-4. **If inconsistency detected**: Use `reconstruct_basket_positions(orders, basket_symbols, snapshot)` with the basket's snapshot and recent orders from `get_equity_orders` to rebuild accurate positions. Offer to update the Watchlist baseline with the corrected data.
+1. Call the basket-manager skill's `basket.py show <slug> --prices '<json>'`, passing current
+   prices fetched from `get_equity_quotes`. The tool returns each holding's target weight,
+   position, current value, and profit or loss, and the basket's total current value.
+2. Call `get_equity_quotes(symbols=[all holding symbols])` for previous close, to compute day
+   change (the `show` output does not include it).
+3. **Run `basket.py verify <slug> --positions '<the get_equity_positions response>'`.** This
+   compares the basket's claimed shares to the real account position for each symbol and
+   reports one of three states: `match`, `outside_shares` (the user holds more outside the
+   basket — normal, no warning needed), or `over_claimed` (the user sold basket shares outside
+   the basket — the record is wrong).
+4. **If a symbol comes back `over_claimed`**: warn the user, and offer the repair from the
+   basket-manager skill's "verify" section — find the sale order in `get_equity_orders`,
+   confirm it with the user, then record it into the basket with `record-fills`.
 5. For each holding with a position (`position != null`), calculate:
    - **Current Value** = position.shares × current_price
    - **Day Change ($)** = position.shares × (current_price - previous_close)
@@ -123,22 +137,21 @@ When the user asks "how's my basket doing?" or "show me my Storage basket":
 
 When the user has a basket and asks "am I on track?" or "do I need to rebalance?":
 
-1. Fetch the target Watchlist using `get_watchlists` and decode metadata with `watchlist_to_basket_dict`
-2. Call `get_equity_quotes(symbols=[...])` for current prices
-3. For each holding with a position, calculate actual weights:
-   - total_basket_value = sum of (shares × current_price) for all positioned holdings
-   - actual_weight[symbol] = (shares × current_price) / total_basket_value × 100
-4. Compare actual vs target weights:
+1. Call `get_equity_quotes` for the basket's holdings.
+2. Call the basket-manager skill's `calc_drift.py --slug <slug> --prices '<json>'`. It
+   compares each holding's actual weight (by current market value) to its target weight, and
+   classifies the drift as `on_target`, `minor_drift`, or `significant_drift`.
+3. Present the result as a table:
 
-| Symbol | Target Weight | Actual Weight | Drift | Action Needed |
+| Symbol | Target Weight | Actual Weight | Drift | Status |
 |---|---|---|---|---|
-| NVDA | 30.0% | 35.2% | +5.2% | Overweight — consider trimming |
-| MSFT | 25.0% | 22.1% | -2.9% | Slightly underweight |
-| GOOGL | 25.0% | 24.8% | -0.2% | On target ✅ |
-| META | 20.0% | 17.9% | -2.1% | Underweight — consider adding |
+| NVDA | 30.0% | 35.2% | +5.2% | significant_drift |
+| MSFT | 25.0% | 22.1% | -2.9% | minor_drift |
+| GOOGL | 25.0% | 24.8% | -0.2% | on_target |
+| META | 20.0% | 17.9% | -2.1% | minor_drift |
 
-5. Flag any holding where `|drift| >= rebalance_threshold_pct` (from the Watchlist metadata `th` field, defaulting to 5.0%) as requiring rebalancing attention.
-6. If the user wants to rebalance, calculate the specific trades needed and suggest the **trade-executor** skill.
+4. Flag every `significant_drift` holding as needing rebalancing attention.
+5. If the user wants to rebalance, calculate the specific trades needed and suggest the **trade-executor** skill.
 
 ### 6. Tax Lot Detail
 
@@ -150,11 +163,14 @@ When the user asks about cost basis or tax lots:
 
 ## Drift & Rebalancing Thresholds
 
-Rebalancing thresholds are resolved using a **hybrid 3-tier resolution hierarchy**:
+`calc_drift.py` resolves the rebalance threshold with a 3-tier hierarchy:
 
-1. **Per-Basket Override**: `"rebalance_threshold_pct"` (`th`) in Watchlist description metadata (highest priority)
-2. **Global Config Override**: `"rebalancing.default_threshold_pct"` in `config.json` at root (if file exists)
-3. **Built-in Skill Fallback**: `5.0%` for rebalancing alerts, `2.0%` for on-target threshold (standalone default)
+1. **An explicit `--threshold` flag** to `calc_drift.py` (highest priority).
+2. **The basket's own `rebalance_threshold_pct`**, set at `create` and changed with `basket.py
+   set-threshold`.
+3. **`rebalancing.default_threshold_pct` in `config.json`** at the repo root, else `5.0%`.
+   `rebalancing.on_target_threshold_pct` in the same file sets the on-target threshold, else
+   `2.0%`.
 
 | Drift Level | Range | Flag |
 |---|---|---|
@@ -174,9 +190,9 @@ If a basket includes stocks the user doesn't have a position in (`position: null
 
 - When drift is significant, suggest rebalancing trades via the **trade-executor** skill
 - When a position is performing unusually, suggest deeper research via the **stock-researcher** skill
-- Drift analysis and basket performance reference basket files from the **basket-manager** skill
+- Drift analysis and basket performance read the local event-log store through the **basket-manager** skill's `basket.py` and `calc_drift.py`
 - After viewing positions, offer to create a basket from current holdings (basket-manager)
-- After a trade fills, suggest recording the transaction in the relevant basket (basket-manager)
+- After a trade fills, offer to record it into the relevant basket with `record-fills` (basket-manager)
 
 ## Example Interactions
 
@@ -184,7 +200,8 @@ If a basket includes stocks the user doesn't have a position in (`position: null
 → Fetch positions + quotes → Show table with unrealized P&L → Show total
 
 **User**: "How's my Storage & Memory basket doing?"
-→ Load basket → Fetch quotes → Calculate day change + total P&L per holding → Present table with totals
+→ `basket.py show storage-and-memory-index --prices '{...}'` → fetch quotes for day change →
+present table with totals → run `verify --positions` and flag any `over_claimed` symbol
 
 **User**: "Am I aligned with my AI Leaders basket?"
 → Load AI Leaders basket → Fetch quotes → Show drift table → Flag outliers

@@ -15,7 +15,7 @@ Works with [Claude Code](#claude-code), [Cursor](#cursor), and [Codex](#codex).
 - **Safety-First Trade Execution**: Mandatory review-before-place safety rails for all brokerage operations, ensuring user confirmation prior to order placement.
 - **Deep Market & Fundamental Research**: Full suite of fundamental analysis, financial statement trends, technical indicators (RSI, MACD, Bollinger Bands, Moving Averages), and earnings history.
 - **Stock Screening**: Build and execute live market scanners using Robinhood's Beacon screening engine.
-- **Cloud-Native Basket Storage**: Custom baskets and portfolio baselines are saved directly on Robinhood servers as custom Watchlists using `Z64:` compressed metadata encoding (`Z64:...`), storing up to 30+ symbols without local database files.
+- **Local Basket Storage**: Baskets live on the local machine, in `~/.tradethos`, not on Robinhood. One append-only event log is the source of truth for every basket's definition and trade history; every read replays it, so a basket needs no network call and no size limit. A command-line tool, `basket.py`, is the only writer.
 
 ---
 
@@ -23,12 +23,12 @@ Works with [Claude Code](#claude-code), [Cursor](#cursor), and [Codex](#codex).
 
 Tradethos ships five specialized skills in `skills/`:
 
-| Skill | Description | Primary MCP Tools Used |
+| Skill | Description | Primary Tools Used |
 |---|---|---|
-| **🧺 `basket-manager`** | Create, edit, and manage custom thematic stock baskets with target weights, baseline snapshots, and Z64 compressed metadata. | `create_watchlist`, `update_watchlist`, `get_watchlists` |
+| **🧺 `basket-manager`** | Create, edit, and manage custom thematic stock baskets with target weights and a local trade ledger. | `basket.py` (local, no network) |
 | **📊 `stock-researcher`** | Conduct structured stock & industry research covering valuation, financials, technical indicators, and earnings. | `get_equity_fundamentals`, `get_financials`, `get_equity_technical_indicators`, `get_earnings_results` |
 | **💰 `trade-executor`** | Review and place market, limit, and stop orders with mandatory safety checks, extended hours handling, and idempotency protection. | `review_equity_order`, `place_equity_order`, `get_equity_tradability`, `cancel_equity_order` |
-| **📈 `portfolio-tracker`** | Monitor open positions, evaluate total account P&L, analyze basket target drift, and highlight rebalancing needs. | `get_portfolio`, `get_equity_positions`, `get_equity_quotes`, `get_realized_pnl` |
+| **📈 `portfolio-tracker`** | Monitor open positions, evaluate total account P&L, analyze basket target drift, and highlight rebalancing needs. | `get_portfolio`, `get_equity_positions`, `get_equity_quotes`, `get_realized_pnl`, `basket.py verify` |
 | **🔍 `stock-screener`** | Discover investment opportunities by creating and running custom screeners and market presets. | `create_scan`, `run_scan`, `get_scanner_filter_specs` |
 
 ---
@@ -53,13 +53,14 @@ tradethos/
 │   ├── basket-manager/
 │   │   ├── SKILL.md
 │   │   ├── examples/sample_basket.json
-│   │   └── scripts/                  # Stdlib-only basket utilities
-│   │       ├── basket_utils.py       # Z64 encode/decode, snapshots, recovery
-│   │       ├── basket_summary.py
-│   │       ├── calc_drift.py
-│   │       ├── calc_performance.py
-│   │       ├── list_symbols.py
-│   │       └── migrate_to_watchlists.py
+│   │   └── scripts/                  # Stdlib-only basket tool and store
+│   │       ├── basket.py             # The CLI. The only writer of basket data.
+│   │       ├── basket_events.py      # Event log I/O: locked append, read, schema versions
+│   │       ├── basket_store.py       # Replays the log into basket state; the money math
+│   │       ├── basket_weights.py     # Whole-number weight normalization
+│   │       ├── calc_drift.py         # Weight drift vs. target, read-only
+│   │       ├── calc_performance.py   # P&L with a supplied prices JSON, read-only
+│   │       └── migrate_v2.py         # One-time: migrates the old cloud baskets into the store
 │   ├── stock-researcher/
 │   │   ├── SKILL.md
 │   │   └── references/research_workflow.md
@@ -74,12 +75,15 @@ tradethos/
 │       └── references/filter_guide.md
 ├── tests/                            # Unit tests (python3 -m unittest)
 ├── data/
-│   └── baskets/                      # Legacy local basket JSON files (gitignored)
+│   └── baskets/                      # Historical input to migrate_v2.py (gitignored)
 ├── config.json                       # Shared defaults and thresholds
 ├── AGENTS.md                         # Project rules & safety guidelines
 ├── LICENSE
 └── README.md
 ```
+
+Basket data itself lives outside the repository, at `~/.tradethos/` — see
+`docs/superpowers/specs/2026-07-27-basket-local-storage-design.md` for the full design.
 
 Run the tests from the repo root:
 

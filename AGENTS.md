@@ -7,11 +7,19 @@
 - When presenting stock data, always include the symbol, current price, and relevant context (e.g., day change).
 
 ## Custom Baskets
-- Custom baskets (user-defined indices) are stored cloud-natively as Robinhood Watchlists named `Basket: <Name>` (e.g., `Basket: Storage Leaders`).
-- Basket metadata (slug, target model weights, rebalance threshold, baseline holding snapshot) is encoded in the Watchlist `display_description` using `zlib` Base64 compression (`Z64:...`) to fit up to 30+ symbols under Robinhood's 256-character limit.
-- Holdings and cost basis are read from the baseline snapshot in `Z64:` metadata (primary source of truth).
-- After trade fills, baseline snapshots **must** be updated in-place via `update_basket_watchlist_baseline` + `update_watchlist`. Always verify the update by re-fetching and decoding the Watchlist.
-- If a snapshot update fails or positions look inconsistent, use `reconstruct_basket_positions(orders, basket_symbols, snapshot)` as a recovery mechanism to rebuild positions from `get_equity_orders`.
+- Custom baskets (user-defined indices) are stored locally, in `~/.tradethos`. They are not
+  Robinhood Watchlists and need no network call to read or write.
+- One append-only event log, `~/.tradethos/events.log.jsonl`, is the source of truth for every
+  basket's name, target weights, thesis text, and trade history. Every read replays this log.
+- `~/.tradethos/baskets/<slug>.json` holds one snapshot file per basket. A snapshot is an
+  export for the user to read. No command reads a snapshot back.
+- `basket.py`, the basket-manager skill's command-line tool, is the only writer. The agent
+  never edits a basket file directly.
+- `record-fills` is the only command that records a trade, and it reads the share count and
+  the fill price from a real Robinhood order — never from a number the agent typed.
+- `basket.py verify --positions` compares a basket's claimed shares to the real account
+  position. Run it when reporting a basket, and offer the repair when a symbol is
+  over-claimed (see the basket-manager skill).
 
 ## Research-First Approach
 - When a user expresses interest in buying a stock they haven't researched yet, suggest running research first before proceeding to trade.
@@ -24,6 +32,6 @@
 - Generate a fresh UUID `ref_id` for each new logical order. Reuse the same `ref_id` only when retrying a failed transport.
 
 ## Skill Coordination
-- Skills can reference each other. For example, the trade-executor skill can read basket files to suggest basket-aligned trades.
+- Skills can reference each other. For example, the trade-executor skill can read basket data via `basket.py show` to suggest basket-aligned trades.
 - When suggesting cross-skill actions (e.g., "would you like to add this to a basket?"), frame them as offers, not automatic actions.
-- After a trade fills for a stock in a basket, offer to record the transaction in the basket file.
+- After a trade fills for a stock in a basket, offer to record the fill. The record goes through `basket.py record-fills`, passing the order id — never a typed share count or price.
