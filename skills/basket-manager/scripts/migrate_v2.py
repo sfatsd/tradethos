@@ -8,8 +8,10 @@ itself, and it never touches the network: everything arrives as arguments.
 
 Order data is authoritative for shares and prices. The `Z64:` snapshot
 embedded in each watchlist's description is a lossy 5-decimal copy; it is
-used only to decide which basket an order belongs to. See
-docs/superpowers/plans/2026-07-29-local-basket-storage-stage2.md.
+used only to decide which basket an order belongs to. Measured against the
+live account, the two disagree by up to 0.0001 shares, so the attribution
+tolerance is 0.0005 — well above that drift, and well below the smallest
+gap between two baskets competing for one symbol.
 """
 
 import argparse

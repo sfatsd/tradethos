@@ -82,8 +82,8 @@ tradethos/
 └── README.md
 ```
 
-Basket data itself lives outside the repository, at `~/.tradethos/` — see
-`docs/superpowers/specs/2026-07-27-basket-local-storage-design.md` for the full design.
+Basket data itself lives outside the repository, at `~/.tradethos/`. The
+`basket-manager` skill documents the store, its commands, and its rules.
 
 Run the tests from the repo root:
 
