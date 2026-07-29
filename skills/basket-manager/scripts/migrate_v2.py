@@ -12,6 +12,7 @@ used only to decide which basket an order belongs to. See
 docs/superpowers/plans/2026-07-29-local-basket-storage-stage2.md.
 """
 
+import json
 import sys
 from pathlib import Path
 
@@ -19,6 +20,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
+from basket_events import EPOCH, EventLog, make_event, parse_timestamp
+from basket_store import replay, slugify
 from basket_utils import decode_watchlist_metadata
 from basket_weights import normalize_weights
 
@@ -97,6 +100,48 @@ def normalize_basket_weights(weights):
     return normalized, changed
 
 
+def read_legacy_theses(baskets_dir):
+    """Return {slug: {symbol: thesis, "__description__": str}} from the old JSON files.
+
+    Each legacy file's own `name` field is slugified with the SAME function
+    (`basket_store.slugify`) that the migration uses to compute a basket's new
+    slug from its watchlist display name. Because both sides derive their key
+    from the same name string through the same function, the two agree
+    without needing to reverse-engineer the old (possibly truncated)
+    watchlist slug or parse the legacy filename.
+
+    Returns {} when `baskets_dir` is falsy, missing, or holds no readable
+    JSON files — the migration still runs, just with empty theses.
+    """
+    theses = {}
+    if not baskets_dir:
+        return theses
+    directory = Path(baskets_dir)
+    if not directory.exists():
+        return theses
+
+    for path in sorted(directory.glob("*.json")):
+        try:
+            data = json.loads(path.read_text())
+        except ValueError:
+            continue
+        if not isinstance(data, dict):
+            continue
+        name = data.get("name")
+        if not name:
+            continue
+
+        entry = {"__description__": data.get("description", "") or ""}
+        for holding in data.get("holdings") or []:
+            if not isinstance(holding, dict):
+                continue
+            symbol = holding.get("symbol")
+            if symbol:
+                entry[symbol] = holding.get("thesis", "") or ""
+        theses[slugify(name)] = entry
+    return theses
+
+
 # --- attribution --------------------------------------------------------------
 
 def _order_shares(order):
@@ -117,6 +162,49 @@ def _order_shares(order):
         if value > 0:
             return value
     return 0.0
+
+
+def _order_price(order):
+    """Return the fill price of an order.
+
+    `average_price` is the fill price; `price` is the limit/reference price
+    and is deliberately never read. A quantity-weighted mean of `executions`
+    is the only fallback.
+    """
+    raw = order.get("average_price")
+    if raw not in (None, ""):
+        try:
+            value = float(raw)
+            if value > 0:
+                return value
+        except (TypeError, ValueError):
+            pass
+
+    total_shares = 0.0
+    total_cost = 0.0
+    for execution in order.get("executions") or []:
+        if not isinstance(execution, dict):
+            continue
+        try:
+            shares = float(execution.get("quantity") or 0)
+            price = float(execution.get("price") or 0)
+        except (TypeError, ValueError):
+            continue
+        if shares > 0 and price > 0:
+            total_shares += shares
+            total_cost += shares * price
+    return total_cost / total_shares if total_shares > 0 else 0.0
+
+
+def _order_fill_time(order):
+    """Return the raw fill timestamp of an order, or None."""
+    for raw in (order.get("last_transaction_at"), order.get("created_at")):
+        if raw and parse_timestamp(raw) is not None:
+            return raw
+    for raw in (order.get("last_transaction_at"), order.get("created_at")):
+        if raw:
+            return raw
+    return None
 
 
 def _claimed_shares(snapshot_entry):
@@ -191,3 +279,198 @@ def attribute_orders(baskets, orders):
 
     unattributed = [o for o in filled_orders if o.get("id") not in assignments]
     return assignments, unattributed
+
+
+# --- building events -----------------------------------------------------------
+
+def _sort_order_ids_by_fill_time(order_ids, order_index):
+    """Return order ids sorted by fill time, undated ids sorted last.
+
+    Mirrors basket.py's `sort_order_ids`: the raw timestamp strings are not
+    directly comparable (two to six fractional digits, an optional `Z`), so
+    each one is parsed. An id with no usable time sorts last rather than
+    landing in an arbitrary slot, and ties keep the caller's order.
+    """
+    decorated = []
+    for position, order_id in enumerate(order_ids):
+        order = order_index.get(order_id)
+        stamp = parse_timestamp(_order_fill_time(order) if order else None)
+        decorated.append((stamp is None, stamp or EPOCH, position, order_id))
+    decorated.sort(key=lambda row: (row[0], row[1], row[2]))
+    return [row[3] for row in decorated]
+
+
+def _build_basket_plans(baskets, assignments, orders, theses):
+    """Return one plan dict per basket: its events, and the fields the report needs.
+
+    `build_events` and `migrate` both drive from this, so the slug rule, the
+    weight normalization, and the event ordering are computed exactly once
+    and can never drift between the two.
+    """
+    theses = theses or {}
+    order_index = dict((o.get("id"), o) for o in orders if isinstance(o, dict) and o.get("id"))
+
+    orders_by_old_slug = {}
+    for order_id, old_slug in assignments.items():
+        orders_by_old_slug.setdefault(old_slug, []).append(order_id)
+
+    plans = []
+    for basket in baskets:
+        old_slug = basket["slug"]
+        new_slug = slugify(basket["name"])
+        normalized, changed = normalize_basket_weights(basket["weights"])
+        basket_theses = theses.get(new_slug) or {}
+
+        events = [make_event(
+            "basket_created", new_slug,
+            name=basket["name"],
+            description=basket_theses.get("__description__", ""),
+            account_number="",
+            rebalance_threshold_pct=basket.get("threshold", 5.0),
+        )]
+
+        for symbol, weight in normalized.items():
+            events.append(make_event(
+                "holding_added", new_slug, symbol=symbol, weight=weight,
+                thesis=basket_theses.get(symbol, "")))
+
+        candidate_ids = orders_by_old_slug.get(old_slug, [])
+        ordered_ids = _sort_order_ids_by_fill_time(candidate_ids, order_index)
+
+        used_order_ids = []
+        for order_id in ordered_ids:
+            order = order_index.get(order_id)
+            if order is None:
+                continue
+            symbol = order.get("symbol")
+            if symbol not in normalized:
+                continue
+            shares = _order_shares(order)
+            price = _order_price(order)
+            if shares <= 0 or price <= 0:
+                continue
+            events.append(make_event(
+                "buy", new_slug, symbol=symbol, shares=shares, price=price,
+                amount=shares * price, order_id=order_id,
+                ts=order.get("last_transaction_at")))
+            used_order_ids.append(order_id)
+
+        plans.append({
+            "old_slug": old_slug,
+            "new_slug": new_slug,
+            "symbols": sorted(normalized),
+            "orders": used_order_ids,
+            "weights_changed": changed,
+            "events": events,
+        })
+    return plans
+
+
+def build_events(baskets, assignments, orders, theses):
+    """Return the full ordered list of events for every basket.
+
+    Per basket, in order: one `basket_created`, one `holding_added` per
+    symbol carrying its NORMALIZED weight, then one `buy` per attributed
+    order in fill-time order.
+    """
+    events = []
+    for plan in _build_basket_plans(baskets, assignments, orders, theses):
+        events.extend(plan["events"])
+    return events
+
+
+# --- migration -----------------------------------------------------------------
+
+def migrate(data_dir, watchlists, orders, legacy_dir, apply=False):
+    """Read the sources, attribute orders, and write through the event log.
+
+    Never writes when `apply` is False. When `apply` is True, skips any
+    basket whose (new) slug already exists in the log, and skips any `buy`
+    whose order id the log already carries — a second `--apply` adds
+    nothing.
+
+    Returns a report: `dry_run`, `baskets` (each with `old_slug`,
+    `new_slug`, `symbols`, `orders`, `weights_changed`), `unattributed`,
+    and `warnings`.
+    """
+    data_dir = Path(data_dir)
+    baskets = read_baskets(watchlists)
+    orders_list = [o for o in _unwrap_list(orders, "orders", "results") if isinstance(o, dict)]
+    theses = read_legacy_theses(legacy_dir)
+
+    assignments, unattributed = attribute_orders(baskets, orders_list)
+    plans = _build_basket_plans(baskets, assignments, orders_list, theses)
+
+    def plan_events(existing_slugs, existing_order_ids):
+        """Return (basket_reports, new_events, warnings) against a given state.
+
+        Shared by the dry-run path and the locked apply path below, so the
+        skip rule — a basket whose slug already exists, or a buy whose
+        order id already exists — is computed identically either way.
+        """
+        reports = []
+        events = []
+        notes = []
+        for plan in plans:
+            report_entry = {
+                "old_slug": plan["old_slug"],
+                "new_slug": plan["new_slug"],
+                "symbols": plan["symbols"],
+                "orders": plan["orders"],
+                "weights_changed": plan["weights_changed"],
+            }
+            if plan["new_slug"] in existing_slugs:
+                report_entry["already_migrated"] = True
+                reports.append(report_entry)
+                continue
+
+            for event in plan["events"]:
+                if event["type"] == "buy" and event.get("order_id") in existing_order_ids:
+                    # The order was claimed by some other basket already on
+                    # record. Emitting it again would only be ignored by
+                    # replay's dedupe, so leave it out and say why.
+                    notes.append(
+                        "Order %s (basket %s) was already recorded elsewhere "
+                        "and was skipped." % (event.get("order_id"), plan["new_slug"]))
+                    continue
+                events.append(event)
+            reports.append(report_entry)
+        return reports, events, notes
+
+    log = EventLog(data_dir)
+
+    if apply:
+        # The read and the write happen under one exclusive lock, so a
+        # concurrent writer cannot slip a basket or order in between the
+        # check and the append. EventLog.append() takes the same lock
+        # re-entrantly (the depth counter in EventLog.locked() supports
+        # this), so this does not deadlock.
+        with log.locked():
+            existing = replay(log.read())
+            basket_reports, new_events, warnings = plan_events(
+                set(existing.baskets), set(existing.order_index))
+            if new_events:
+                log.append(new_events)
+    else:
+        # A dry run must leave no trace on disk. EventLog.read() takes only
+        # a shared lock and never creates the file; log.locked() would open
+        # the file in "a+" mode and create it as a side effect, so it is
+        # never entered here.
+        existing = replay(log.read())
+        basket_reports, new_events, warnings = plan_events(
+            set(existing.baskets), set(existing.order_index))
+
+    return {
+        "dry_run": not apply,
+        "baskets": basket_reports,
+        "unattributed": [
+            {
+                "order_id": order.get("id"),
+                "symbol": order.get("symbol"),
+                "shares": _order_shares(order),
+                "fill_time": order.get("last_transaction_at"),
+            }
+            for order in unattributed
+        ],
+        "warnings": warnings,
+    }

@@ -3,6 +3,7 @@
 
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -15,6 +16,9 @@ from migrate_v2 import (
     normalize_basket_weights,
     read_baskets,
 )
+
+from basket_events import EventLog
+from basket_store import replay
 
 FIXTURES = ROOT / "tests" / "fixtures"
 
@@ -121,6 +125,91 @@ class TestAttribution(unittest.TestCase):
     def test_tolerance_is_tight_enough_to_separate_competing_claims(self):
         # LITE's two claims differ by 0.018; the tolerance must be far below that.
         self.assertLess(SHARE_TOLERANCE, 0.018 / 2)
+
+
+class TestBuildAndMigrate(unittest.TestCase):
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.watchlists = load("live_watchlists.json")
+        self.orders = load("live_orders.json")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_migration(self, apply=True):
+        from migrate_v2 import migrate
+        return migrate(self.dir, self.watchlists, self.orders, None, apply=apply)
+
+    def state(self):
+        return replay(EventLog(self.dir).read()).baskets
+
+    def test_dry_run_writes_nothing(self):
+        report = self.run_migration(apply=False)
+        self.assertFalse((self.dir / "events.log.jsonl").exists())
+        self.assertTrue(report["dry_run"])
+        self.assertEqual(len(report["baskets"]), 6)
+
+    def test_apply_creates_every_basket(self):
+        self.run_migration()
+        self.assertEqual(len(self.state()), 6)
+
+    def test_the_truncated_slug_is_regenerated(self):
+        self.run_migration()
+        slugs = set(self.state())
+        self.assertIn("optical-photonics-index", slugs)
+        self.assertNotIn("optical-and-photonics-in", slugs)
+
+    def test_weights_are_normalized_to_one_hundred(self):
+        self.run_migration()
+        for slug, basket in self.state().items():
+            total = sum(h.target_weight_pct for h in basket.holdings.values())
+            self.assertEqual(total, 100, slug)
+            for holding in basket.holdings.values():
+                self.assertEqual(holding.target_weight_pct,
+                                 int(holding.target_weight_pct))
+
+    def test_the_one_hundred_and_twenty_basket_is_reported_as_changed(self):
+        report = self.run_migration()
+        entry = [b for b in report["baskets"] if b["old_slug"] == "test-250"][0]
+        self.assertTrue(entry["weights_changed"])
+
+    def test_positions_come_from_order_data_not_the_snapshot(self):
+        self.run_migration()
+        mag7 = self.state()["magnificent-7-index"]
+        nvda = mag7.holdings["NVDA"].position
+        # The order filled 0.068659; the lossy snapshot said 0.06865.
+        self.assertAlmostEqual(nvda.shares, 0.068659, places=9)
+        self.assertAlmostEqual(nvda.avg_cost, 208.1299, places=4)
+
+    def test_the_unattributed_order_is_in_no_basket(self):
+        self.run_migration()
+        total = 0.0
+        for basket in self.state().values():
+            holding = basket.holdings.get("NVDA")
+            if holding:
+                total += holding.position.shares
+        self.assertAlmostEqual(total, 0.068659, places=9)
+
+    def test_the_report_names_the_unattributed_order(self):
+        report = self.run_migration()
+        self.assertEqual(len(report["unattributed"]), 1)
+        self.assertEqual(report["unattributed"][0]["symbol"], "NVDA")
+
+    def test_a_second_apply_changes_nothing(self):
+        self.run_migration()
+        before = EventLog(self.dir).count()
+        self.run_migration()
+        self.assertEqual(EventLog(self.dir).count(), before)
+
+    def test_the_migration_writes_through_the_event_log(self):
+        # Every line must be a valid event with a version field.
+        self.run_migration()
+        for event in EventLog(self.dir).read():
+            self.assertIn("v", event)
+            self.assertIn("type", event)
+            self.assertIn("slug", event)
 
 
 if __name__ == "__main__":
