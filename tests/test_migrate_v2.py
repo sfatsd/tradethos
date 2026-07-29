@@ -13,10 +13,14 @@ sys.path.insert(0, str(ROOT / "skills" / "basket-manager" / "scripts"))
 
 from migrate_v2 import (
     SHARE_TOLERANCE,
+    _build_basket_plans,
     attribute_orders,
+    filter_orders_by_account,
+    migrate,
     normalize_basket_weights,
     read_baskets,
     resolve_slug,
+    weight_normalization_report,
 )
 
 from basket_events import EventLog
@@ -355,6 +359,196 @@ class TestMigrateCli(unittest.TestCase):
         self.assertEqual(proc.returncode, 1)
         payload = json.loads(proc.stderr)
         self.assertIn("code", payload)
+
+
+def basket_fixture(slug="test-basket", name="Test Basket", weights=None,
+                    snapshot=None):
+    """A minimal `read_baskets`-shaped basket dict for the tests below."""
+    return {
+        "slug": slug, "name": name,
+        "weights": weights or {"NVDA": 100},
+        "snapshot": snapshot or {},
+        "threshold": 5.0,
+    }
+
+
+def synthetic_order(order_id, symbol="NVDA", side="buy", quantity="10",
+                    average_price="200.00",
+                    last_transaction_at="2026-01-01T00:00:00Z", **extra):
+    order = {
+        "id": order_id, "symbol": symbol, "side": side, "state": "filled",
+        "cumulative_quantity": quantity, "average_price": average_price,
+        "last_transaction_at": last_transaction_at,
+    }
+    order.update(extra)
+    return order
+
+
+def watchlist_entry(slug, name, weights_with_claims, ts=1782950000):
+    """Build one `get_watchlists` result entry from {symbol: (weight, shares, avg_cost)}.
+
+    Uses the raw-JSON metadata shape `decode_watchlist_metadata` accepts
+    directly (no Z64/zlib wrapping needed for a test fixture).
+    """
+    w = dict((symbol, list(triple)) for symbol, triple in weights_with_claims.items())
+    description = json.dumps({"s": slug, "w": w, "t": ts})
+    return {"display_name": "Basket: %s" % name, "display_description": description}
+
+
+class TestSellEventsAreRecordedAsSells(unittest.TestCase):
+    """Finding 1: a filled sell must not be written to the log as a buy."""
+
+    def test_a_filled_sell_produces_a_sell_event_with_the_right_shares_and_price(self):
+        basket = basket_fixture(snapshot={"NVDA": [10.0, 200.0]})
+        order = synthetic_order("sell-1", side="sell", quantity="10",
+                                average_price="250.00")
+        assignments, unattributed = attribute_orders([basket], [order])
+        self.assertEqual(assignments.get("sell-1"), "test-basket")
+        self.assertEqual(unattributed, [])
+
+        plans = _build_basket_plans([basket], assignments, [order], {}, "ACCT1")
+        trade_events = [e for e in plans[0]["events"] if e["type"] in ("buy", "sell")]
+        self.assertEqual(len(trade_events), 1)
+        event = trade_events[0]
+        self.assertEqual(event["type"], "sell")
+        self.assertEqual(event["shares"], 10.0)
+        self.assertEqual(event["price"], 250.0)
+        self.assertEqual(event["order_id"], "sell-1")
+
+    def test_a_filled_buy_still_produces_a_buy_event(self):
+        basket = basket_fixture(snapshot={"NVDA": [10.0, 200.0]})
+        order = synthetic_order("buy-1", side="buy", quantity="10",
+                                average_price="200.00")
+        assignments, _ = attribute_orders([basket], [order])
+        plans = _build_basket_plans([basket], assignments, [order], {}, "ACCT1")
+        trade_events = [e for e in plans[0]["events"] if e["type"] in ("buy", "sell")]
+        self.assertEqual(len(trade_events), 1)
+        self.assertEqual(trade_events[0]["type"], "buy")
+
+    def test_an_order_with_an_unrecognized_side_is_skipped_and_reported(self):
+        basket = basket_fixture(snapshot={"NVDA": [10.0, 200.0]})
+        order = synthetic_order("weird-1", side="exercise", quantity="10",
+                                average_price="250.00")
+        assignments, _ = attribute_orders([basket], [order])
+        # It still matches the snapshot claim on shares alone -- attribution
+        # never looks at side -- but its side is not one this tool can record.
+        self.assertEqual(assignments.get("weird-1"), "test-basket")
+
+        plans = _build_basket_plans([basket], assignments, [order], {}, "ACCT1")
+        plan = plans[0]
+        self.assertEqual(plan["orders"], [])
+        self.assertFalse(any(e["type"] in ("buy", "sell") for e in plan["events"]))
+        self.assertEqual(len(plan["skipped_orders"]), 1)
+        self.assertEqual(plan["skipped_orders"][0]["order_id"], "weird-1")
+        self.assertEqual(plan["skipped_orders"][0]["side"], "exercise")
+
+    def test_the_migration_report_warns_about_the_unrecognized_side(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            watchlists = {"data": {"results": [
+                watchlist_entry("test-basket", "Test Basket",
+                                {"NVDA": (100, 10.0, 200.0)}),
+            ]}}
+            orders = {"data": {"orders": [
+                synthetic_order("weird-1", side="exercise"),
+            ]}}
+            report = migrate(Path(tmp.name), watchlists, orders, None, "ACCT1",
+                             apply=True)
+            self.assertTrue(any("weird-1" in w for w in report["warnings"]))
+            events = EventLog(Path(tmp.name)).read()
+            self.assertFalse(any(e.get("order_id") == "weird-1" for e in events))
+        finally:
+            tmp.cleanup()
+
+
+class TestClaimIsConsumedByAtMostOneOrder(unittest.TestCase):
+    """The 'also worth addressing' item: a claim must not fund two orders."""
+
+    def test_two_orders_matching_one_claim_attribute_only_one(self):
+        basket = basket_fixture(snapshot={"NVDA": [10.0, 200.0]})
+        order_a = synthetic_order("a", quantity="10", average_price="200.00")
+        order_b = synthetic_order("b", quantity="10", average_price="210.00")
+        assignments, unattributed = attribute_orders([basket], [order_a, order_b])
+        self.assertEqual(len(assignments), 1)
+        self.assertEqual(len(unattributed), 1)
+        # The tie breaks on order id, so "a" wins and "b" is left unattributed.
+        self.assertEqual(assignments.get("a"), "test-basket")
+        self.assertIsNone(assignments.get("b"))
+
+
+class TestAccountFiltering(unittest.TestCase):
+    """Finding 4: an order from a different account must not be migrated."""
+
+    def test_an_order_naming_a_different_account_is_excluded(self):
+        matching, warnings = filter_orders_by_account(
+            [synthetic_order("o1", account_number="OTHER-ACCT")], "ACCT1")
+        self.assertEqual(matching, [])
+        self.assertTrue(any("o1" in w and "OTHER-ACCT" in w for w in warnings))
+
+    def test_an_order_naming_the_same_account_passes_through(self):
+        order = synthetic_order("o1", account_number="ACCT1")
+        matching, warnings = filter_orders_by_account([order], "ACCT1")
+        self.assertEqual(matching, [order])
+        self.assertEqual(warnings, [])
+
+    def test_an_order_with_no_account_field_passes_through_unchecked(self):
+        order = synthetic_order("o1")
+        matching, warnings = filter_orders_by_account([order], "ACCT1")
+        self.assertEqual(matching, [order])
+        self.assertEqual(warnings, [])
+
+    def test_the_migration_report_names_the_excluded_order(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            watchlists = {"data": {"results": [
+                watchlist_entry("test-basket", "Test Basket",
+                                {"NVDA": (100, 10.0, 200.0)}),
+            ]}}
+            orders = {"data": {"orders": [
+                synthetic_order("other-acct", account_number="SOME-OTHER-ACCOUNT"),
+            ]}}
+            report = migrate(Path(tmp.name), watchlists, orders, None, "ACCT1",
+                             apply=True)
+            self.assertTrue(any("other-acct" in w for w in report["warnings"]))
+            events = EventLog(Path(tmp.name)).read()
+            self.assertFalse(any(e.get("order_id") == "other-acct" for e in events))
+        finally:
+            tmp.cleanup()
+
+
+class TestNormalizedWeightReport(unittest.TestCase):
+    """Finding 6: report each changed symbol's before-and-after weight."""
+
+    def test_weight_normalization_report_carries_before_and_after(self):
+        original = {"NVDA": 14.29, "MSFT": 14.29, "AAPL": 14.29, "GOOGL": 14.29,
+                    "AMZN": 14.28, "META": 14.28, "SPCX": 14.28}
+        normalized, _ = normalize_basket_weights(original)
+        report = weight_normalization_report(original, normalized)
+        self.assertEqual(set(report), set(original))
+        self.assertEqual(report["NVDA"], {"from": 14.29, "to": 14})
+        self.assertEqual(report["AAPL"], {"from": 14.29, "to": 15})
+
+    def test_an_unchanged_weight_set_reports_no_symbols(self):
+        original = {"A": 60, "B": 40}
+        normalized, _ = normalize_basket_weights(original)
+        self.assertEqual(weight_normalization_report(original, normalized), {})
+
+    def test_the_live_migration_report_shows_mag7s_per_symbol_changes(self):
+        tmp = tempfile.TemporaryDirectory()
+        try:
+            report = migrate(Path(tmp.name), load("live_watchlists.json"),
+                             load("live_orders.json"), None, "5PA00000",
+                             apply=False)
+        finally:
+            tmp.cleanup()
+        entry = [b for b in report["baskets"]
+                if b["old_slug"] == "magnificent-7-index"][0]
+        normalized = entry["normalized"]
+        self.assertIn("NVDA", normalized)
+        self.assertAlmostEqual(normalized["NVDA"]["from"], 14.29)
+        self.assertEqual(normalized["NVDA"]["to"], 14)
+        self.assertAlmostEqual(normalized["AAPL"]["from"], 14.29)
+        self.assertEqual(normalized["AAPL"]["to"], 15)
 
 
 if __name__ == "__main__":

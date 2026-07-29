@@ -22,7 +22,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from basket_events import EventLog
+from basket_events import EventLog, corrupt_line_warnings
 from basket_store import replay, snapshot_dict
 
 DEFAULT_DATA_DIR = Path.home() / ".tradethos"
@@ -54,10 +54,17 @@ def load_config():
 
 
 def load_baskets(data_dir):
-    """Replay the event log. Return {slug: snapshot_dict}."""
+    """Replay the event log. Return ({slug: snapshot_dict}, corrupt_lines).
+
+    A torn line - what a crash mid-flush leaves behind - must not make this
+    script silently under-report, the same way `basket.py show` will not:
+    `corrupt_lines` rides along so the caller can warn about it instead of
+    just returning numbers computed from an incomplete log.
+    """
     events, corrupt = EventLog(data_dir).read_with_corruption()
     result = replay(events, corrupt)
-    return dict((slug, snapshot_dict(b)) for slug, b in result.baskets.items())
+    baskets = dict((slug, snapshot_dict(b)) for slug, b in result.baskets.items())
+    return baskets, corrupt
 
 
 def classify_drift(drift_abs, on_target_threshold, rebalance_threshold):
@@ -181,13 +188,16 @@ def main():
         return basket.get("rebalance_threshold_pct", default_threshold)
 
     data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
-    baskets = load_baskets(data_dir)
+    baskets, corrupt = load_baskets(data_dir)
     chosen = select_baskets(baskets, args.slug, args.all)
     results = [calc_basket_drift(data, prices, resolve_threshold(data), default_on_target)
                for data in chosen]
+    warnings = corrupt_line_warnings(corrupt) if corrupt else []
 
     if args.format == "json":
         output = results[0] if len(results) == 1 else {"baskets": results}
+        if warnings:
+            output["warnings"] = warnings
         print(json.dumps(output, indent=2))
     else:
         for drift in results:
@@ -214,6 +224,9 @@ def main():
             else:
                 print("\nAll holdings are within +/-%s%% drift tolerance"
                       % drift["threshold_pct"])
+
+        for warning in warnings:
+            print("WARNING: %s" % warning)
 
 
 if __name__ == "__main__":

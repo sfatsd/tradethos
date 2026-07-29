@@ -26,7 +26,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 from basket_events import EPOCH, EventLog, make_event, parse_timestamp
-from basket_store import replay, slugify
+from basket_store import TRADE_TYPES, replay, slugify
 from basket_weights import WeightError, normalize_weights
 
 DEFAULT_DATA_DIR = Path.home() / ".tradethos"
@@ -200,6 +200,25 @@ def normalize_basket_weights(weights):
     return normalized, changed
 
 
+def weight_normalization_report(original, normalized):
+    """Return {symbol: {"from": old, "to": new}} for every moved weight.
+
+    `cmd_create` (basket.py) reports normalization as `{symbol: new_weight}`
+    for the symbols it changed - enough there, because the caller just typed
+    the "from" value themselves. A migrated basket's original weight came
+    from the old cloud metadata, which nobody here typed, so the "from" value
+    is reported too; a bare `weights_changed: true` (the previous report) let
+    a set of uniform 14.29 inputs turn into 14/14/15/15/14/14/14 with no way
+    to see which symbols moved.
+    """
+    changes = {}
+    for symbol, new_weight in normalized.items():
+        old_weight = original.get(symbol)
+        if old_weight != new_weight:
+            changes[symbol] = {"from": old_weight, "to": new_weight}
+    return changes
+
+
 def read_legacy_theses(baskets_dir):
     """Return {slug: {symbol: thesis, "__description__": str}} from the old JSON files.
 
@@ -240,6 +259,46 @@ def read_legacy_theses(baskets_dir):
                 entry[symbol] = holding.get("thesis", "") or ""
         theses[slugify(name)] = entry
     return theses
+
+
+def _order_account(order):
+    """Return an order's account number, if the field is present, else None.
+
+    The live `get_equity_orders` response is fetched one account at a time
+    and its order objects carry no account field at all - every order this
+    migration has ever seen already belongs to the account it was fetched
+    for. Nothing guarantees that stays true for every source this script
+    might be fed, so a field is honored when it happens to be there.
+    """
+    for key in ("account_number", "account"):
+        value = order.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def filter_orders_by_account(orders, account):
+    """Split orders into (matching, warnings) against the migration's account.
+
+    An order that carries no account field passes through unchecked. An
+    order that does carry one, and it does not match `account`, is dropped
+    rather than silently migrated as this account's trade — the same
+    principle as the account guard `record-fills` already applies at
+    replay time (basket.py), just applied here before attribution ever
+    sees the order.
+    """
+    matching = []
+    warnings = []
+    for order in orders:
+        order_account = _order_account(order)
+        if order_account is not None and order_account != account:
+            warnings.append(
+                "Order %s (%s) came from account %s, not %s, and was "
+                "excluded from the migration."
+                % (order.get("id"), order.get("symbol"), order_account, account))
+            continue
+        matching.append(order)
+    return matching, warnings
 
 
 # --- attribution --------------------------------------------------------------
@@ -338,6 +397,13 @@ def attribute_orders(baskets, orders):
     weight set (see: semiconductor-etf-style, which holds NVDA and MU but
     carries no snapshot at all).
 
+    A (basket, symbol) claim is also good for at most one order: once the
+    closest match has consumed it, a second order that also happens to fall
+    within tolerance of the same claim is left unattributed rather than
+    double-counted against a single snapshot number. This did not fire on
+    the real migration - every competing quantity across the six live
+    baskets is distinct - but nothing enforced it before.
+
     Returns (assignments, unattributed): `assignments` maps order id to the
     winning basket's (metadata) slug; `unattributed` is the list of filled
     orders — the full order dict — that matched no candidate.
@@ -365,17 +431,26 @@ def attribute_orders(baskets, orders):
                 continue
             diff = abs(shares - claimed)
             if diff <= SHARE_TOLERANCE:
-                contenders.append((diff, order_id, basket["slug"]))
+                contenders.append((diff, order_id, basket["slug"], symbol))
 
     # Closest match first; ties break deterministically on order id then slug
     # so the result never depends on dict/list iteration order.
     contenders.sort(key=lambda c: (c[0], c[1], c[2]))
 
     assignments = {}
-    for _diff, order_id, slug in contenders:
+    claimed_pairs = set()
+    for _diff, order_id, slug, symbol in contenders:
         if order_id in assignments:
             continue
+        pair = (slug, symbol)
+        if pair in claimed_pairs:
+            # This basket's claim for this symbol is already spoken for by a
+            # closer (or earlier-tied) order. A second order this close to
+            # the same single claim is not a second claim - leave it
+            # unattributed rather than attribute it twice off one number.
+            continue
         assignments[order_id] = slug
+        claimed_pairs.add(pair)
 
     unattributed = [o for o in filled_orders if o.get("id") not in assignments]
     return assignments, unattributed
@@ -454,6 +529,7 @@ def _build_basket_plans(baskets, assignments, orders, theses, account):
         old_slug = basket["slug"]
         new_slug = resolve_slug(old_slug, basket["name"])
         normalized, changed = normalize_basket_weights(basket["weights"])
+        normalized_report = weight_normalization_report(basket["weights"], normalized)
         # Legacy theses are keyed by slugify(name) (see read_legacy_theses),
         # which is not always this basket's final slug now that resolve_slug
         # can keep the stored one — fall back to the name-derived key so a
@@ -479,6 +555,7 @@ def _build_basket_plans(baskets, assignments, orders, theses, account):
         ordered_ids = _sort_order_ids_by_fill_time(candidate_ids, order_index)
 
         used_order_ids = []
+        skipped_orders = []
         for order_id in ordered_ids:
             order = order_index.get(order_id)
             if order is None:
@@ -490,8 +567,22 @@ def _build_basket_plans(baskets, assignments, orders, theses, account):
             price = _order_price(order)
             if shares <= 0 or price <= 0:
                 continue
+
+            side = (order.get("side") or "").lower()
+            if side not in ("buy", "sell"):
+                # An order attribution matched on symbol and share count
+                # alone, never on side. A side this tool does not recognize
+                # must not be recorded as either a buy or a sell - that would
+                # fabricate a cost basis or a position change that never
+                # happened. Skip it and say so, the same way an unattributed
+                # order is named in the report.
+                skipped_orders.append({
+                    "order_id": order_id, "symbol": symbol, "side": side,
+                })
+                continue
+
             events.append(make_event(
-                "buy", new_slug, symbol=symbol, shares=shares, price=price,
+                side, new_slug, symbol=symbol, shares=shares, price=price,
                 amount=shares * price, order_id=order_id,
                 ts=order.get("last_transaction_at")))
             used_order_ids.append(order_id)
@@ -502,6 +593,8 @@ def _build_basket_plans(baskets, assignments, orders, theses, account):
             "symbols": sorted(normalized),
             "orders": used_order_ids,
             "weights_changed": changed,
+            "normalized": normalized_report,
+            "skipped_orders": skipped_orders,
             "events": events,
         })
     return plans
@@ -538,11 +631,14 @@ def migrate(data_dir, watchlists, orders, legacy_dir, account, apply=False):
 
     Returns a report: `dry_run`, `baskets` (each with `old_slug`,
     `new_slug` — equal when the stored slug was kept unchanged — `symbols`,
-    `orders`, `weights_changed`), `unattributed`, and `warnings`.
+    `orders`, `weights_changed`, and `normalized` — `{symbol: {"from", "to"}}`
+    for every symbol the normalization actually moved), `unattributed`, and
+    `warnings`.
     """
     data_dir = Path(data_dir)
     baskets = read_baskets(watchlists)
     orders_list = [o for o in _unwrap_list(orders, "orders", "results") if isinstance(o, dict)]
+    orders_list, account_warnings = filter_orders_by_account(orders_list, account)
     theses = read_legacy_theses(legacy_dir)
 
     assignments, unattributed = attribute_orders(baskets, orders_list)
@@ -552,12 +648,12 @@ def migrate(data_dir, watchlists, orders, legacy_dir, account, apply=False):
         """Return (basket_reports, new_events, warnings) against a given state.
 
         Shared by the dry-run path and the locked apply path below, so the
-        skip rule — a basket whose slug already exists, or a buy whose
+        skip rule — a basket whose slug already exists, or a buy/sell whose
         order id already exists — is computed identically either way.
         """
         reports = []
         events = []
-        notes = []
+        notes = list(account_warnings)
         for plan in plans:
             report_entry = {
                 "old_slug": plan["old_slug"],
@@ -565,14 +661,21 @@ def migrate(data_dir, watchlists, orders, legacy_dir, account, apply=False):
                 "symbols": plan["symbols"],
                 "orders": plan["orders"],
                 "weights_changed": plan["weights_changed"],
+                "normalized": plan["normalized"],
             }
+            for skipped in plan["skipped_orders"]:
+                notes.append(
+                    "Order %s (%s) was attributed to basket %s but its side "
+                    "%r is neither buy nor sell, so it was not recorded."
+                    % (skipped["order_id"], skipped["symbol"], plan["new_slug"],
+                       skipped["side"]))
             if plan["new_slug"] in existing_slugs:
                 report_entry["already_migrated"] = True
                 reports.append(report_entry)
                 continue
 
             for event in plan["events"]:
-                if event["type"] == "buy" and event.get("order_id") in existing_order_ids:
+                if event["type"] in TRADE_TYPES and event.get("order_id") in existing_order_ids:
                     # The order was claimed by some other basket already on
                     # record. Emitting it again would only be ignored by
                     # replay's dedupe, so leave it out and say why.
@@ -682,6 +785,15 @@ def print_table(report):
         print("%-28s %-32s %8d %8d %s%s" % (
             row["old_slug"], row["new_slug"], len(row["symbols"]),
             len(row["orders"]), row["weights_changed"], note))
+
+    changed_rows = [row for row in report["baskets"] if row.get("normalized")]
+    if changed_rows:
+        print()
+        print("Weights the normalization changed:")
+        for row in changed_rows:
+            for symbol, change in sorted(row["normalized"].items()):
+                print("  %s  %s: %s -> %s" % (
+                    row["new_slug"], symbol, change["from"], change["to"]))
 
     if report["unattributed"]:
         print()

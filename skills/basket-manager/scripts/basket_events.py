@@ -90,6 +90,23 @@ def parse_timestamp(text):
         return None
 
 
+def corrupt_line_warnings(corrupt):
+    """Build one warning message per log line a replay had to skip.
+
+    Shared by every caller of `EventLog.read_with_corruption` -
+    `basket.py`'s commands, plus `calc_performance.py` and `calc_drift.py` -
+    so a skipped line is reported identically wherever it surfaces. A
+    command or script whose data came back incomplete must say so; it must
+    never just look right.
+    """
+    return [
+        "Line %d of the event log is not valid JSON, so the replay "
+        "skipped it: %r. Edit or remove that line."
+        % (entry["line"], entry["raw"][:80])
+        for entry in corrupt
+    ]
+
+
 def make_event(event_type, slug, **fields):
     """Build an event with the fields that every event carries."""
     event = {

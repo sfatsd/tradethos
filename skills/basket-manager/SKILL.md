@@ -82,8 +82,8 @@ Every command defaults to the real store at `~/.tradethos`. **Do not pass `--dat
 normal use. Pass `--data-dir` only inside a test, pointed at a temporary directory.
 
 Every command prints JSON on stdout by default. Pass `--format table` for a short
-human-readable view; `list` and `history` support it, and every command still accepts it (some
-commands fall back to JSON when they have no table view).
+human-readable view; `list` supports it, and every command still accepts it (most commands,
+including `history`, fall back to JSON when they have no table view of their own).
 
 ## Commands
 

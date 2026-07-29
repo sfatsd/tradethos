@@ -1218,5 +1218,61 @@ class TestVerifyAndBackup(CliTestCase):
         self.assertTrue(backups)
 
 
+class TestVerifyPositionsAcrossBaskets(CliTestCase):
+    """Finding 2: a slug filter must not hide a store-wide over-claim.
+
+    alpha claims 6 NVDA, beta claims 5, and the account holds 8. The whole
+    store is over-claimed (11 > 8). `verify alpha --positions` used to
+    compare alpha's own 6 against the account's 8 and call that
+    `outside_shares` - a "nothing to do here" result - when the truth is
+    that alpha's basket-mate is why the account looks short.
+    """
+
+    def setUp(self):
+        CliTestCase.setUp(self)
+        self.alpha = self.make_basket(name="Alpha", symbols="NVDA:100")
+        self.run_cli(
+            "record-fills", self.alpha, "--orders-json",
+            orders_response(order(order_id="a1", symbol="NVDA", quantity="6",
+                                  average_price="50.00")),
+            "--order-ids", "a1", "--account", "000000000")
+        self.beta = self.make_basket(name="Beta", symbols="NVDA:100")
+        self.run_cli(
+            "record-fills", self.beta, "--orders-json",
+            orders_response(order(order_id="b1", symbol="NVDA", quantity="5",
+                                  average_price="55.00")),
+            "--order-ids", "b1", "--account", "000000000")
+
+    def test_unfiltered_verify_reports_the_combined_over_claim(self):
+        code, out, err = self.run_cli(
+            "verify", "--positions", positions_response(("NVDA", 8)))
+        self.assertEqual(code, 0, err)
+        row = [r for r in out["positions"] if r["symbol"] == "NVDA"][0]
+        self.assertEqual(row["claimed"], 11.0)
+        self.assertEqual(row["state"], "over_claimed")
+
+    def test_a_slug_filtered_verify_still_reports_the_combined_over_claim(self):
+        code, out, err = self.run_cli(
+            "verify", self.alpha, "--positions", positions_response(("NVDA", 8)))
+        self.assertEqual(code, 0, err)
+        row = [r for r in out["positions"] if r["symbol"] == "NVDA"][0]
+        # The claimed total is the WHOLE store's (6 + 5), not just alpha's
+        # own 6 - that is the bug this test guards against.
+        self.assertEqual(row["claimed"], 11.0)
+        self.assertEqual(row["state"], "over_claimed")
+
+    def test_the_warning_names_the_other_basket(self):
+        code, out, err = self.run_cli(
+            "verify", self.alpha, "--positions", positions_response(("NVDA", 8)))
+        self.assertEqual(code, 0, err)
+        self.assertTrue(any(self.beta in w for w in out["warnings"]))
+
+    def test_a_slug_filtered_verify_only_lists_that_baskets_symbols(self):
+        code, out, err = self.run_cli(
+            "verify", self.alpha, "--positions", positions_response(("NVDA", 8)))
+        self.assertEqual(code, 0, err)
+        self.assertEqual([r["symbol"] for r in out["positions"]], ["NVDA"])
+
+
 if __name__ == "__main__":
     unittest.main()

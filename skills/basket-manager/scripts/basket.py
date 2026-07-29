@@ -16,7 +16,8 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import basket_events
-from basket_events import EPOCH, EventLog, make_event, parse_timestamp, utc_now
+from basket_events import (EPOCH, EventLog, corrupt_line_warnings, make_event,
+                           parse_timestamp, utc_now)
 from basket_store import replay, slugify, snapshot_dict
 from basket_weights import FILL_MODES, WeightError, normalize_weights, refill
 
@@ -242,23 +243,6 @@ def basket_view(basket, prices=None):
             entry["pnl"] = None
     data["totals"]["current_value"] = round(total_value, 2) if prices else None
     return data
-
-
-def corrupt_line_warnings(corrupt):
-    """Build one warning message per log line the replay had to skip.
-
-    `verify` and every read command (`show`, `list`, `history`, `export`)
-    call this on the same `corrupt` list that `EventLog.read_with_corruption`
-    produces, so a skipped line is always reported the same way, wherever it
-    surfaces. A command whose data came back incomplete must say so; it must
-    never just look right.
-    """
-    return [
-        "Line %d of the event log is not valid JSON, so the replay "
-        "skipped it: %r. Edit or remove that line."
-        % (entry["line"], entry["raw"][:80])
-        for entry in corrupt
-    ]
 
 
 # --- commands ---------------------------------------------------------------
@@ -1047,16 +1031,31 @@ def cmd_verify(args, store):
     positions = positions_from_response(args.positions)
     rows = None
     if positions is not None:
+        # Claims are summed across EVERY live basket, regardless of `slug` -
+        # comparing one basket's slice of a symbol against the whole account
+        # is never meaningful; two baskets that each hold part of a symbol
+        # can only be judged over-claimed by looking at their combined total.
+        # `slug` narrows which symbols get a row (the ones a wanted basket
+        # holds), never what a symbol's claimed total is.
         claims = {}
+        holders = {}
         for slug, basket in result.baskets.items():
-            if not wanted(slug):
-                continue
             for symbol, holding in basket.holdings.items():
                 if holding.has_position:
                     claims[symbol] = claims.get(symbol, 0.0) + holding.position.shares
+                    holders.setdefault(symbol, {})[slug] = holding.position.shares
+
+        if args.slug:
+            report_symbols = set()
+            for slug, basket in result.baskets.items():
+                if wanted(slug):
+                    report_symbols.update(
+                        s for s, h in basket.holdings.items() if h.has_position)
+        else:
+            report_symbols = set(claims) | set(positions)
 
         rows = []
-        for symbol in sorted(set(claims) | set(positions)):
+        for symbol in sorted(report_symbols):
             claimed = claims.get(symbol, 0.0)
             actual = positions.get(symbol, 0.0)
             if abs(claimed - actual) < 1e-6:
@@ -1065,10 +1064,19 @@ def cmd_verify(args, store):
                 state = "outside_shares"
             else:
                 state = "over_claimed"
-                warnings.append(
-                    "Baskets claim %s shares of %s, but the account holds %s. "
-                    "Section 7.4 of the design gives the repair."
-                    % (claimed, symbol, actual))
+                other_holders = sorted(
+                    s for s in holders.get(symbol, {}) if s != args.slug)
+                if args.slug and other_holders:
+                    warnings.append(
+                        "Baskets claim %s shares of %s, but the account "
+                        "holds %s. %s also claims this symbol. Section 7.4 "
+                        "of the design gives the repair."
+                        % (claimed, symbol, actual, ", ".join(other_holders)))
+                else:
+                    warnings.append(
+                        "Baskets claim %s shares of %s, but the account holds %s. "
+                        "Section 7.4 of the design gives the repair."
+                        % (claimed, symbol, actual))
             rows.append({"symbol": symbol, "claimed": round(claimed, 6),
                          "account": round(actual, 6), "state": state})
 
