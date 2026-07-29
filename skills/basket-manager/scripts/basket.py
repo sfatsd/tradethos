@@ -453,6 +453,100 @@ def cmd_delete(args, store):
     return {"deleted": args.slug}
 
 
+def _require_holdings(basket):
+    if not basket.holdings:
+        raise CliError(
+            "The basket %r holds no symbols. Add a holding first." % basket.slug,
+            "EMPTY_BASKET", {"slug": basket.slug})
+
+
+def cmd_plan_buy(args, store):
+    _, basket = store.require(args.slug)
+    _require_holdings(basket)
+    prices = parse_prices(args.prices)
+
+    orders = []
+    for symbol, holding in basket.holdings.items():
+        amount = args.amount * holding.target_weight_pct / 100.0
+        row = {"symbol": symbol,
+               "target_weight_pct": holding.target_weight_pct,
+               "amount": round(amount, 2), "shares": None}
+        price = prices.get(symbol)
+        if price:
+            row["shares"] = round(amount / price, 6)
+            row["price"] = price
+        orders.append(row)
+
+    return {"slug": args.slug, "side": "buy", "amount": args.amount,
+            "orders": orders}
+
+
+def cmd_plan_sell(args, store):
+    _, basket = store.require(args.slug)
+    _require_holdings(basket)
+    prices = parse_prices(args.prices)
+
+    held = [(s, h) for s, h in basket.holdings.items() if h.has_position]
+
+    if args.all:
+        if not held:
+            raise CliError("The basket holds no shares", "NO_POSITION",
+                           {"slug": args.slug})
+        orders = []
+        proceeds = 0.0
+        for symbol, holding in held:
+            row = {"symbol": symbol, "shares": round(holding.position.shares, 6)}
+            price = prices.get(symbol)
+            if price:
+                value = holding.position.shares * price
+                row["price"] = price
+                row["estimated_proceeds"] = round(value, 2)
+                proceeds += value
+            orders.append(row)
+        return {"slug": args.slug, "side": "sell", "mode": "all",
+                "orders": orders,
+                "estimated_proceeds": round(proceeds, 2) if prices else None}
+
+    # --amount checks --prices before checking for a held position, so a call
+    # with neither reports the missing prices rather than the empty position.
+    if not prices:
+        raise CliError("--amount needs --prices, because the split follows the "
+                       "current market value", "PRICES_REQUIRED", {})
+
+    if not held:
+        raise CliError("The basket holds no shares", "NO_POSITION",
+                       {"slug": args.slug})
+
+    values = {}
+    total_value = 0.0
+    for symbol, holding in held:
+        price = prices.get(symbol)
+        if not price:
+            raise CliError("No price given for %s" % symbol, "PRICES_REQUIRED",
+                           {"symbol": symbol})
+        value = holding.position.shares * price
+        values[symbol] = value
+        total_value += value
+
+    if args.amount > total_value + 1e-9:
+        raise CliError(
+            "The basket is worth %.2f, which is below the requested %.2f. "
+            "Use --all to exit the basket." % (total_value, args.amount),
+            "AMOUNT_ABOVE_VALUE",
+            {"basket_value": round(total_value, 2), "requested": args.amount})
+
+    fraction = args.amount / total_value
+    orders = []
+    for symbol, holding in held:
+        shares = holding.position.shares * fraction
+        orders.append({"symbol": symbol, "shares": round(shares, 6),
+                       "price": prices[symbol],
+                       "estimated_proceeds": round(shares * prices[symbol], 2)})
+    return {"slug": args.slug, "side": "sell", "mode": "amount",
+            "amount": args.amount, "basket_value": round(total_value, 2),
+            "orders": orders}
+
+
 def orders_from_response(payload):
     """Return {order_id: order} from a get_equity_orders response.
 
@@ -789,6 +883,20 @@ def build_parser():
     p.add_argument("--account", required=True)
     p.add_argument("--cap-at-held", action="store_true")
     p.set_defaults(func=cmd_record_fills)
+
+    p = add("plan-buy", "Plan a whole-basket purchase")
+    p.add_argument("slug")
+    p.add_argument("--amount", type=float, required=True)
+    p.add_argument("--prices", default="")
+    p.set_defaults(func=cmd_plan_buy)
+
+    p = add("plan-sell", "Plan a whole-basket sale")
+    p.add_argument("slug")
+    group = p.add_mutually_exclusive_group(required=True)
+    group.add_argument("--amount", type=float)
+    group.add_argument("--all", action="store_true")
+    p.add_argument("--prices", default="")
+    p.set_defaults(func=cmd_plan_sell)
 
     return parser
 

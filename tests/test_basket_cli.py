@@ -505,5 +505,84 @@ class TestRecordFills(CliTestCase):
         self.assertIn("between 1 and 100", err)
 
 
+class TestPlanning(CliTestCase):
+
+    def setUp(self):
+        CliTestCase.setUp(self)
+        self.slug = self.make_basket(name="Pair", symbols="NVDA:60,MSFT:40")
+
+    def test_plan_buy_allocates_the_full_amount(self):
+        code, out, err = self.run_cli("plan-buy", self.slug, "--amount", "100")
+        self.assertEqual(code, 0, err)
+        amounts = dict((r["symbol"], r["amount"]) for r in out["orders"])
+        self.assertEqual(amounts, {"NVDA": 60.0, "MSFT": 40.0})
+        self.assertEqual(round(sum(amounts.values()), 2), 100.0)
+
+    def test_plan_buy_returns_shares_with_prices(self):
+        code, out, err = self.run_cli("plan-buy", self.slug, "--amount", "100",
+                                      "--prices", '{"NVDA": 200, "MSFT": 100}')
+        self.assertEqual(code, 0, err)
+        shares = dict((r["symbol"], r["shares"]) for r in out["orders"])
+        self.assertAlmostEqual(shares["NVDA"], 0.3)
+        self.assertAlmostEqual(shares["MSFT"], 0.4)
+
+    def test_plan_buy_on_an_empty_basket_exits_one(self):
+        self.run_cli("remove-holding", self.slug, "--symbol", "NVDA")
+        self.run_cli("remove-holding", self.slug, "--symbol", "MSFT")
+        code, _, err = self.run_cli("plan-buy", self.slug, "--amount", "100")
+        self.assertEqual(code, 1)
+        self.assertIn("EMPTY_BASKET", err)
+
+    def test_plan_sell_all_returns_every_share(self):
+        response = orders_response(
+            order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"))
+        self.run_cli("record-fills", self.slug, "--orders-json", response,
+                     "--order-ids", "b1", "--account", "000000000")
+        code, out, err = self.run_cli("plan-sell", self.slug, "--all")
+        self.assertEqual(code, 0, err)
+        shares = dict((r["symbol"], r["shares"]) for r in out["orders"])
+        self.assertEqual(shares["NVDA"], 10.0)
+
+    def test_plan_sell_all_with_prices_returns_proceeds(self):
+        response = orders_response(
+            order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"))
+        self.run_cli("record-fills", self.slug, "--orders-json", response,
+                     "--order-ids", "b1", "--account", "000000000")
+        code, out, err = self.run_cli("plan-sell", self.slug, "--all",
+                                      "--prices", '{"NVDA": 70}')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["estimated_proceeds"], 700.0)
+
+    def test_plan_sell_amount_keeps_the_current_weights(self):
+        # NVDA 10 @ 50 = 500, MSFT 10 @ 25 = 250. Total 750.
+        response = orders_response(
+            order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"),
+            order(order_id="b2", symbol="MSFT", quantity="10", average_price="25.00"))
+        self.run_cli("record-fills", self.slug, "--orders-json", response,
+                     "--order-ids", "b1,b2", "--account", "000000000")
+        code, out, err = self.run_cli("plan-sell", self.slug, "--amount", "75",
+                                      "--prices", '{"NVDA": 50, "MSFT": 25}')
+        self.assertEqual(code, 0, err)
+        shares = dict((r["symbol"], r["shares"]) for r in out["orders"])
+        # 10 percent of each holding's value.
+        self.assertAlmostEqual(shares["NVDA"], 1.0)
+        self.assertAlmostEqual(shares["MSFT"], 1.0)
+
+    def test_plan_sell_above_the_basket_value_is_refused(self):
+        response = orders_response(
+            order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"))
+        self.run_cli("record-fills", self.slug, "--orders-json", response,
+                     "--order-ids", "b1", "--account", "000000000")
+        code, _, err = self.run_cli("plan-sell", self.slug, "--amount", "5000",
+                                    "--prices", '{"NVDA": 50}')
+        self.assertEqual(code, 1)
+        self.assertIn("AMOUNT_ABOVE_VALUE", err)
+
+    def test_plan_sell_amount_needs_prices(self):
+        code, _, err = self.run_cli("plan-sell", self.slug, "--amount", "10")
+        self.assertEqual(code, 1)
+        self.assertIn("PRICES_REQUIRED", err)
+
+
 if __name__ == "__main__":
     unittest.main()
