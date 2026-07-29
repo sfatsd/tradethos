@@ -15,7 +15,8 @@ SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from basket_events import CorruptLineError, EventLog, make_event, utc_now
+import basket_events
+from basket_events import EPOCH, EventLog, make_event, parse_timestamp, utc_now
 from basket_store import replay, slugify, snapshot_dict
 from basket_weights import FILL_MODES, WeightError, normalize_weights, refill
 
@@ -25,6 +26,11 @@ EXIT_OK = 0
 EXIT_VALIDATION = 1
 EXIT_IO = 2
 EXIT_INTEGRITY = 3
+
+# A command that must print a full report AND still signal a non-zero exit
+# puts the code under this key. main() removes it before printing, so it never
+# reaches the caller's JSON.
+EXIT_KEY = "_exit_code"
 
 
 class CliError(Exception):
@@ -47,14 +53,14 @@ class Store(object):
         self.baskets_dir = self.data_dir / "baskets"
 
     def load(self):
-        """Replay the log. Raise a CliError on a corrupt line."""
-        try:
-            events = self.log.read()
-        except CorruptLineError as error:
-            raise CliError(str(error), "CORRUPT_LOG_LINE",
-                           {"line": error.line_number},
-                           exit_code=EXIT_INTEGRITY)
-        return replay(events)
+        """Replay the log, skipping any line that will not parse.
+
+        One truncated line - what a crash mid-flush leaves behind - must not
+        make every basket in the store unreadable. The corrupt lines ride
+        along on the result so `verify` can report them.
+        """
+        events, corrupt = self.log.read_with_corruption()
+        return replay(events, corrupt)
 
     def require(self, slug):
         """Return one basket, or raise a CliError that lists the slugs."""
@@ -123,7 +129,19 @@ def parse_prices(text):
     if not isinstance(data, dict):
         raise CliError("The --prices value must be a JSON object",
                        "BAD_PRICES", {})
-    return dict((str(k).upper(), float(v)) for k, v in data.items())
+
+    prices = {}
+    for key, value in data.items():
+        symbol = str(key).upper()
+        try:
+            prices[symbol] = float(value)
+        except (TypeError, ValueError):
+            # A traceback here would break every caller, which parses the
+            # JSON error envelope on stderr.
+            raise CliError(
+                "The price for %s is not a number: %r" % (symbol, value),
+                "BAD_PRICE", {"symbol": symbol, "value": value})
+    return prices
 
 
 def normalize_or_fail(weights):
@@ -279,11 +297,9 @@ def cmd_show(args, store):
 
 
 def cmd_history(args, store):
-    try:
-        events = store.log.read()
-    except CorruptLineError as error:
-        raise CliError(str(error), "CORRUPT_LOG_LINE",
-                       {"line": error.line_number}, exit_code=EXIT_INTEGRITY)
+    # A corrupt line is skipped, not fatal: the history of every other basket
+    # stays readable. `verify` is the command that reports the bad lines.
+    events = store.log.read()
     rows = []
     for event in events:
         if args.slug and event.get("slug") != args.slug:
@@ -378,20 +394,37 @@ def cmd_remove_holding(args, store):
         if holding is None:
             raise CliError("The basket does not hold %s" % symbol,
                            "SYMBOL_NOT_FOUND", {"symbol": symbol})
+        realized = holding.position.realized_pnl
         if holding.has_position and not args.force:
             raise CliError(
                 "%s still holds %s shares. Sell them first, or pass --force."
                 % (symbol, holding.position.shares),
                 "HOLDING_HAS_POSITION",
                 {"symbol": symbol, "shares": holding.position.shares})
+        # has_position is shares > 0, so a holding that was bought and then
+        # sold out to zero passes that check while still carrying every dollar
+        # of realized profit or loss it ever made. Removing it drops that
+        # record, and a real gain or loss disappears from the basket totals.
+        if realized != 0 and not args.force:
+            raise CliError(
+                "%s holds no shares, but it carries %.2f of realized profit "
+                "and loss. Removing it would discard that record. Pass "
+                "--force to remove it anyway." % (symbol, realized),
+                "HOLDING_HAS_REALIZED_PNL",
+                {"symbol": symbol, "realized_pnl": round(realized, 2)})
 
         new_weights = plan_weight_change(basket, symbol, 0, args.fill,
                                          removing=True)
         removed = make_event("holding_removed", args.slug, symbol=symbol)
         # new_weights omits the removed symbol, so weight_events never emits
         # an event for it.
-        return _apply_weights(store, args, args.slug, basket, new_weights,
-                              extra_events=[removed])
+        payload = _apply_weights(store, args, args.slug, basket, new_weights,
+                                 extra_events=[removed])
+        if realized != 0:
+            payload["warnings"] = [
+                "Removing %s discarded %.2f of realized profit and loss."
+                % (symbol, realized)]
+        return payload
 
 
 def cmd_set_name(args, store):
@@ -446,13 +479,29 @@ def cmd_delete(args, store):
                 % ", ".join(held),
                 "BASKET_HAS_POSITIONS",
                 {"symbols": held, "total_invested": basket.total_invested})
+        # The same leak as remove-holding, one level up: a basket sold out to
+        # zero shares still carries its realized profit and loss, and deleting
+        # it discards that record.
+        realized = basket.realized_pnl
+        if realized != 0 and not args.force:
+            raise CliError(
+                "The basket holds no shares, but it carries %.2f of realized "
+                "profit and loss. Deleting it would discard that record. Pass "
+                "--force to delete it anyway." % realized,
+                "BASKET_HAS_REALIZED_PNL",
+                {"slug": args.slug, "realized_pnl": round(realized, 2)})
         store.log.append([make_event("basket_deleted", args.slug)])
         maybe_backup(store)
 
     path = store.baskets_dir / (args.slug + ".json")
     if path.exists():
         path.unlink()
-    return {"deleted": args.slug}
+    payload = {"deleted": args.slug}
+    if realized != 0:
+        payload["warnings"] = [
+            "Deleting %s discarded %.2f of realized profit and loss."
+            % (args.slug, realized)]
+    return payload
 
 
 def _require_holdings(basket):
@@ -626,16 +675,78 @@ def _order_price(order):
     return total_cost / total_shares if total_shares > 0 else 0.0
 
 
+def _order_fill_time(order):
+    """Return the raw fill timestamp of an order, or None.
+
+    `last_transaction_at` is the fill time and wins. `created_at` is the
+    fallback, and it is also the fallback when `last_transaction_at` holds
+    something no parser can read - a usable time in the second field beats an
+    unusable one in the first. The event's `ts` and the sort key both come
+    from here, so the log and the ordering can never disagree.
+    """
+    if not isinstance(order, dict):
+        return None
+    candidates = [order.get("last_transaction_at"), order.get("created_at")]
+    for raw in candidates:
+        if raw and parse_timestamp(raw) is not None:
+            return raw
+    for raw in candidates:
+        if raw:
+            return raw
+    return None
+
+
+def sort_order_ids(order_ids, index):
+    """Return (sorted_ids, undated) with the ids in trade order.
+
+    Average cost and realized profit and loss depend on the sequence the
+    trades are applied in: a buy at 10, a sell at 15 and a buy at 20 give a
+    different cost basis and a different realized figure for every ordering.
+    The caller passes ids in whatever order it happened to have them, and
+    `get_equity_orders` returns orders newest first, so an agent forwarding
+    them in response order would record the history backwards.
+
+    The sort key is the fill time, which is what the event's `ts` already
+    carries. The raw strings are not comparable as text - they carry two to
+    six fractional digits and may or may not end in `Z` - so each one is
+    parsed. An id with no usable time sorts last and is reported, never
+    silently dropped into an arbitrary slot. Ties keep the caller's order.
+    """
+    decorated = []
+    undated = []
+    for position, order_id in enumerate(order_ids):
+        order = index.get(order_id)
+        stamp = parse_timestamp(_order_fill_time(order))
+        if stamp is None and order is not None:
+            undated.append(order_id)
+        decorated.append((stamp is None, stamp or EPOCH, position, order_id))
+    decorated.sort(key=lambda row: (row[0], row[1], row[2]))
+    return [row[3] for row in decorated], undated
+
+
 def cmd_record_fills(args, store):
-    order_ids = [i.strip() for i in args.order_ids.split(",") if i.strip()]
-    if not order_ids:
+    given_ids = [i.strip() for i in args.order_ids.split(",") if i.strip()]
+    if not given_ids:
         raise CliError("No order ids given", "NO_ORDER_IDS", {})
+
+    # A repeated id in one batch would append two identical events. The replay
+    # dedupes them, so the state stays right, but the log keeps the junk line
+    # forever.
+    order_ids = []
+    repeated = []
+    for order_id in given_ids:
+        if order_id in order_ids:
+            repeated.append(order_id)
+            continue
+        order_ids.append(order_id)
+
     if args.cap_at_held and len(order_ids) != 1:
         raise CliError(
             "--cap-at-held needs exactly one order id, but %d were given"
             % len(order_ids), "CAP_NEEDS_ONE_ORDER", {"count": len(order_ids)})
 
     index = orders_from_response(args.orders_json)
+    order_ids, undated = sort_order_ids(order_ids, index)
 
     with store.log.locked():
         result, basket = store.require(args.slug)
@@ -652,10 +763,14 @@ def cmd_record_fills(args, store):
         already = []
         skipped = []
         capped = []
+        late = []
         # Track shares within this batch so two sells in one call cannot
         # oversell the same holding, and a buy earlier in the batch can fund
         # a sell later in it.
         pending = dict((s, h.position.shares) for s, h in basket.holdings.items())
+        # The latest fill time already on record for each symbol. The batch is
+        # sorted, so anything older than this is history arriving late.
+        latest = dict((s, h.last_fill_ts) for s, h in basket.holdings.items())
 
         for order_id in order_ids:
             order = index.get(order_id)
@@ -720,11 +835,24 @@ def cmd_record_fills(args, store):
             else:
                 pending[symbol] = pending.get(symbol, 0.0) + shares
 
+            fill_ts = _order_fill_time(order)
+            # This fill is older than one already recorded for the same
+            # symbol, so the log is being appended out of sequence. Record it
+            # anyway - dropping a real fill is worse than an unordered log -
+            # but report it so the agent can tell the user.
+            stamp = parse_timestamp(fill_ts)
+            previous = parse_timestamp(latest.get(symbol) or "")
+            if stamp is not None and previous is not None and stamp < previous:
+                late.append({"order_id": order_id, "symbol": symbol,
+                             "fill_time": fill_ts,
+                             "latest_recorded": latest.get(symbol)})
+            elif stamp is not None and (previous is None or stamp >= previous):
+                latest[symbol] = fill_ts
+
             events.append(make_event(
                 side, args.slug, symbol=symbol,
                 shares=shares, price=price, amount=shares * price,
-                order_id=order_id,
-                ts=order.get("last_transaction_at") or order.get("created_at")))
+                order_id=order_id, ts=fill_ts))
             recorded.append(order_id)
 
         if not recorded and not already:
@@ -742,6 +870,9 @@ def cmd_record_fills(args, store):
         "already_recorded": already,
         "skipped": skipped,
         "capped": capped,
+        "late_fills": late,
+        "repeated_ids": repeated,
+        "undated": undated,
         "holdings": snapshot_dict(basket)["holdings"],
     }
 
@@ -828,8 +959,23 @@ def cmd_backup(args, store):
 
 
 def cmd_verify(args, store):
-    result = store.load()          # raises CliError(exit 3) on a corrupt line
+    result = store.load()
     warnings = []
+
+    # A corrupt line is reported here rather than raised at load time, so the
+    # report still names every basket that did replay. The command still exits
+    # 3, because the store's integrity is in question.
+    for entry in result.corrupt:
+        warnings.append(
+            "Line %d of the event log is not valid JSON, so the replay "
+            "skipped it: %r. Edit or remove that line."
+            % (entry["line"], entry["raw"][:80]))
+
+    if not basket_events.LOCKING_AVAILABLE:
+        warnings.append(
+            "This platform has no file locking, so the tool cannot protect "
+            "the log against a concurrent write. Run one basket command at a "
+            "time.")
 
     if args.slug and args.slug not in result.baskets:
         raise CliError("No basket has the slug %r" % args.slug,
@@ -895,9 +1041,15 @@ def cmd_verify(args, store):
             rows.append({"symbol": symbol, "claimed": round(claimed, 6),
                          "account": round(actual, 6), "state": state})
 
-    return {"baskets": sorted(s for s in result.baskets if wanted(s)),
-            "events": count, "ignored_events": ignored,
-            "clamped_sells": clamped, "positions": rows, "warnings": warnings}
+    payload = {"baskets": sorted(s for s in result.baskets if wanted(s)),
+               "events": count, "ignored_events": ignored,
+               "clamped_sells": clamped, "corrupt_lines": result.corrupt,
+               "locking_available": basket_events.LOCKING_AVAILABLE,
+               "positions": rows, "warnings": warnings}
+    if result.corrupt:
+        payload["code"] = "CORRUPT_LOG_LINE"
+        payload[EXIT_KEY] = EXIT_INTEGRITY
+    return payload
 
 
 # --- output -----------------------------------------------------------------
@@ -1092,12 +1244,16 @@ def main(argv=None):
         }) + "\n")
         return EXIT_IO
 
+    exit_code = EXIT_OK
+    if isinstance(payload, dict):
+        exit_code = payload.pop(EXIT_KEY, EXIT_OK)
+
     output_format = getattr(args, "format", "json")
     if output_format == "table":
         print_table(args.command, payload)
     else:
         print(json.dumps(payload, indent=2))
-    return EXIT_OK
+    return exit_code
 
 
 if __name__ == "__main__":

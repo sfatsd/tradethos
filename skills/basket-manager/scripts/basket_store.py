@@ -8,7 +8,7 @@ average-cost arithmetic and the order-id dedupe rule.
 import re
 from collections import OrderedDict
 
-from basket_events import utc_now
+from basket_events import parse_timestamp, utc_now
 
 SCHEMA_VERSION = 2
 TRADE_TYPES = ("buy", "sell")
@@ -74,10 +74,25 @@ class Holding(object):
         self.target_weight_pct = target_weight_pct
         self.thesis = thesis
         self.position = Position()
+        # The latest fill time this holding has on record, by trade time and
+        # not by log order. record-fills compares against it to tell the user
+        # when it is appending history out of sequence.
+        self.last_fill_ts = ""
 
     @property
     def has_position(self):
         return self.position.shares > 0
+
+    def note_fill(self, ts):
+        """Remember the latest fill time this holding has seen."""
+        if not ts:
+            return
+        current = parse_timestamp(self.last_fill_ts)
+        incoming = parse_timestamp(ts)
+        if incoming is None:
+            return
+        if current is None or incoming > current:
+            self.last_fill_ts = ts
 
 
 class Basket(object):
@@ -109,27 +124,41 @@ class Basket(object):
 class ReplayResult(object):
     """The outcome of a replay."""
 
-    def __init__(self, baskets, ignored, order_index, clamped=None):
+    def __init__(self, baskets, ignored, order_index, clamped=None,
+                 corrupt=None):
         self.baskets = baskets
         self.ignored = ignored
         self.order_index = order_index
         self.clamped = clamped if clamped is not None else []
+        # Lines the log could not parse. The replay skipped them; only the
+        # basket they belonged to is degraded.
+        self.corrupt = corrupt if corrupt is not None else []
 
 
-def replay(events):
+def replay(events, corrupt=None):
     """Build every live basket from the events, in log order.
 
     A `basket_deleted` event ends a lifetime. A later `basket_created` event
     with the same slug starts a new one, and the old events stay with the old
     basket.
 
-    A `buy` or `sell` event whose `order_id` already appeared is ignored. The
-    first event wins. Every ignored event goes into the result.
+    A `buy` or `sell` event whose `order_id` already funds a LIVE basket is
+    ignored. The first event wins. Every ignored event goes into the result.
+
+    The order index follows the same lifetimes as the baskets. When a basket
+    is deleted, the orders it claimed are released, because no live basket
+    holds those shares any more. Without that release, deleting a basket and
+    creating one with the same name would burn every order id the old basket
+    ever recorded: the new basket could never take them, and its shares could
+    never be attributed. The guarantee that matters is between LIVE baskets,
+    and releasing on delete leaves that guarantee intact.
     """
     baskets = OrderedDict()
     ignored = []
     order_index = {}
     clamped = []
+    # slug -> the order ids claimed during its current lifetime.
+    lifetime_orders = {}
 
     for event in events:
         slug = event.get("slug")
@@ -147,6 +176,7 @@ def replay(events):
             basket.created_at = event.get("ts", "")
             basket.updated_at = event.get("ts", "")
             baskets[slug] = basket
+            lifetime_orders[slug] = set()
             continue
 
         basket = baskets.get(slug)
@@ -158,6 +188,8 @@ def replay(events):
 
         if event_type == "basket_deleted":
             del baskets[slug]
+            for claimed in lifetime_orders.pop(slug, ()):
+                order_index.pop(claimed, None)
 
         elif event_type == "basket_updated":
             field = event.get("field")
@@ -200,6 +232,7 @@ def replay(events):
 
             shares = float(event.get("shares", 0.0))
             price = float(event.get("price", 0.0))
+            holding.note_fill(event.get("ts", ""))
             if event_type == "buy":
                 holding.position.buy(shares, price)
             else:
@@ -216,8 +249,9 @@ def replay(events):
 
             if order_id:
                 order_index[order_id] = slug
+                lifetime_orders.setdefault(slug, set()).add(order_id)
 
-    return ReplayResult(baskets, ignored, order_index, clamped)
+    return ReplayResult(baskets, ignored, order_index, clamped, corrupt)
 
 
 def snapshot_dict(basket):

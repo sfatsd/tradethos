@@ -13,7 +13,12 @@ import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-CLI = ROOT / "skills" / "basket-manager" / "scripts" / "basket.py"
+SCRIPTS = ROOT / "skills" / "basket-manager" / "scripts"
+CLI = SCRIPTS / "basket.py"
+sys.path.insert(0, str(SCRIPTS))
+
+import basket            # noqa: E402  - needs the path above
+import basket_events     # noqa: E402
 
 
 class CliTestCase(unittest.TestCase):
@@ -290,17 +295,24 @@ class TestWeightCommands(CliTestCase):
 
 
 def order(order_id="o1", symbol="NVDA", side="buy", quantity="10",
-          average_price="50.00", state="filled", price="49.00"):
-    """Build an order in the shape that get_equity_orders returns."""
-    return {
+          average_price="50.00", state="filled", price="49.00",
+          created_at="2026-07-23T19:25:22.952062Z",
+          last_transaction_at="2026-07-23T19:25:23.115Z"):
+    """Build an order in the shape that get_equity_orders returns.
+
+    A None timestamp drops that key, which is how an order with no usable
+    fill time is built.
+    """
+    built = {
         "id": order_id, "symbol": symbol, "side": side, "state": state,
         "quantity": quantity, "cumulative_quantity": quantity,
         "price": price, "average_price": average_price,
         "dollar_based_amount": {"amount": "10.00", "currency_code": "USD"},
-        "created_at": "2026-07-23T19:25:22.952062Z",
-        "last_transaction_at": "2026-07-23T19:25:23.115Z",
+        "created_at": created_at,
+        "last_transaction_at": last_transaction_at,
         "executions": [{"price": average_price, "quantity": quantity}],
     }
+    return dict((k, v) for k, v in built.items() if v is not None)
 
 
 def orders_response(*orders):
@@ -505,6 +517,423 @@ class TestRecordFills(CliTestCase):
         self.assertIn("between 1 and 100", err)
 
 
+class TestFillOrdering(CliTestCase):
+    """record-fills must apply orders in trade order, not argument order.
+
+    Average cost and realized profit and loss depend on the sequence. A buy at
+    10, a sell at 15 and a buy at 20 give 2000.00 invested and 500.00 realized
+    in trade order, but 1500.00 and 0.00 if the two buys are applied first.
+    get_equity_orders returns orders newest first, so an agent forwarding ids
+    in response order hits exactly that case.
+    """
+
+    def setUp(self):
+        CliTestCase.setUp(self)
+        self.slug = self.make_basket(name="Solo", symbols="NVDA:100")
+
+    def batch(self):
+        return orders_response(
+            order(order_id="b1", side="buy", quantity="100",
+                  average_price="10.00",
+                  created_at="2026-01-01T15:00:00.12Z",
+                  last_transaction_at="2026-01-01T15:00:00.12Z"),
+            order(order_id="s1", side="sell", quantity="100",
+                  average_price="15.00",
+                  created_at="2026-01-02T15:00:00.123456Z",
+                  last_transaction_at="2026-01-02T15:00:00.123456Z"),
+            order(order_id="b2", side="buy", quantity="100",
+                  average_price="20.00",
+                  created_at="2026-01-03T15:00:00Z",
+                  last_transaction_at="2026-01-03T15:00:00Z"))
+
+    def position(self, slug=None):
+        shown = self.run_cli("show", slug or self.slug)[1]
+        return [h for h in shown["holdings"]
+                if h["symbol"] == "NVDA"][0]["position"]
+
+    def test_the_argument_order_does_not_change_the_result(self):
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", self.batch(),
+            "--order-ids", "b1,b2,s1", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        # Sorted into trade order before any event was built.
+        self.assertEqual(out["recorded"], ["b1", "s1", "b2"])
+        position = self.position()
+        self.assertEqual(position["total_invested"], 2000.00)
+        self.assertEqual(position["realized_pnl"], 500.00)
+
+    def test_newest_first_gives_the_same_state_as_oldest_first(self):
+        # Each ordering gets its own empty store, so the two runs cannot see
+        # each other's events.
+        states = []
+        saved = self.data_dir
+        for ids in ("b1,s1,b2", "b2,s1,b1"):
+            fresh = tempfile.TemporaryDirectory()
+            self.addCleanup(fresh.cleanup)
+            self.data_dir = Path(fresh.name)
+            try:
+                slug = self.make_basket(name="Solo", symbols="NVDA:100")
+                code, _, err = self.run_cli(
+                    "record-fills", slug, "--orders-json", self.batch(),
+                    "--order-ids", ids, "--account", "000000000")
+                self.assertEqual(code, 0, err)
+                states.append(self.position(slug))
+            finally:
+                self.data_dir = saved
+        self.assertEqual(states[0], states[1])
+        self.assertEqual(states[0]["realized_pnl"], 500.00)
+        self.assertEqual(states[0]["total_invested"], 2000.00)
+
+    def test_a_fill_older_than_the_history_is_reported(self):
+        # Record the January 3 buy first, then hand it the January 1 buy. The
+        # tool records it - dropping a real fill is worse - but says so.
+        code, _, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", self.batch(),
+            "--order-ids", "b2", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", self.batch(),
+            "--order-ids", "b1", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["b1"])
+        self.assertEqual(len(out["late_fills"]), 1)
+        late = out["late_fills"][0]
+        self.assertEqual(late["order_id"], "b1")
+        self.assertEqual(late["symbol"], "NVDA")
+        self.assertEqual(late["latest_recorded"], "2026-01-03T15:00:00Z")
+
+    def test_a_fill_in_sequence_is_not_reported_late(self):
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", self.batch(),
+            "--order-ids", "b1,s1,b2", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["late_fills"], [])
+
+    def test_an_order_with_no_usable_time_sorts_last_and_is_reported(self):
+        batch = orders_response(
+            order(order_id="undated", quantity="10", average_price="10.00",
+                  created_at=None, last_transaction_at=None),
+            order(order_id="dated", quantity="10", average_price="20.00",
+                  created_at="2026-01-05T15:00:00Z",
+                  last_transaction_at="2026-01-05T15:00:00Z"))
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", batch,
+            "--order-ids", "undated,dated", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["dated", "undated"])
+        self.assertEqual(out["undated"], ["undated"])
+
+    def test_an_unparseable_time_sorts_last_and_is_reported(self):
+        batch = orders_response(
+            order(order_id="junk", quantity="10", average_price="10.00",
+                  created_at="not a date", last_transaction_at="not a date"),
+            order(order_id="dated", quantity="10", average_price="20.00",
+                  created_at="2026-01-05T15:00:00Z",
+                  last_transaction_at="2026-01-05T15:00:00Z"))
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", batch,
+            "--order-ids", "junk,dated", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["dated", "junk"])
+        self.assertEqual(out["undated"], ["junk"])
+
+    def test_an_unreadable_fill_time_falls_back_to_created_at(self):
+        # A usable time in created_at beats an unusable last_transaction_at,
+        # rather than dumping the order at the end of the batch.
+        batch = orders_response(
+            order(order_id="early", side="buy", quantity="100",
+                  average_price="10.00",
+                  created_at="2026-01-01T15:00:00Z",
+                  last_transaction_at="garbage"),
+            order(order_id="later", side="sell", quantity="100",
+                  average_price="15.00",
+                  created_at="2026-01-02T15:00:00Z",
+                  last_transaction_at="2026-01-02T15:00:00Z"))
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", batch,
+            "--order-ids", "later,early", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["early", "later"])
+        self.assertEqual(out["undated"], [])
+        self.assertEqual(self.position()["realized_pnl"], 500.00)
+
+    def test_a_repeated_id_in_one_batch_writes_one_event(self):
+        response = orders_response(order(order_id="o1"))
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", response,
+            "--order-ids", "o1,o1", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["o1"])
+        self.assertEqual(out["repeated_ids"], ["o1"])
+        # The replay dedupes, so the state was never wrong. The log is what
+        # the repeat polluted, and the log is permanent.
+        events = self.run_cli("history", self.slug)[1]["events"]
+        buys = [e for e in events if e["type"] == "buy"]
+        self.assertEqual(len(buys), 1)
+
+
+class TestCorruptLineDegrades(CliTestCase):
+    """One bad line must degrade one basket, not the whole store."""
+
+    def setUp(self):
+        CliTestCase.setUp(self)
+        self.clean = self.make_basket(name="Clean", symbols="NVDA:100")
+        self.other = self.make_basket(name="Other", symbols="MSFT:100")
+        self.log = self.data_dir / "events.log.jsonl"
+
+    def corrupt(self):
+        """Append a truncated line, as a crash mid-flush leaves behind."""
+        with self.log.open("a") as handle:
+            handle.write('{"v":1,"ts":"2026-01-01T00:00:00Z","type":"buy"\n')
+        return len(self.log.read_text().splitlines())
+
+    def test_show_still_works_for_an_unaffected_basket(self):
+        self.corrupt()
+        code, out, err = self.run_cli("show", self.clean)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["slug"], self.clean)
+
+    def test_list_still_names_every_basket(self):
+        self.corrupt()
+        code, out, err = self.run_cli("list")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(b["slug"] for b in out["baskets"]),
+                         sorted([self.clean, self.other]))
+
+    def test_history_and_export_still_work(self):
+        self.corrupt()
+        code, out, err = self.run_cli("history", self.clean)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out["events"])
+        code, out, err = self.run_cli("export")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sorted(out["exported"]),
+                         sorted([self.clean, self.other]))
+
+    def test_verify_reports_the_line_number_and_exits_three(self):
+        number = self.corrupt()
+        code, out, err = self.run_cli("verify")
+        self.assertEqual(code, 3)
+        self.assertEqual([c["line"] for c in out["corrupt_lines"]], [number])
+        # Every basket that replayed cleanly is still named in the report.
+        self.assertEqual(sorted(out["baskets"]),
+                         sorted([self.clean, self.other]))
+
+    def test_verify_reports_every_corrupt_line(self):
+        first = self.corrupt()
+        second = self.corrupt()
+        code, out, _ = self.run_cli("verify")
+        self.assertEqual(code, 3)
+        self.assertEqual([c["line"] for c in out["corrupt_lines"]],
+                         [first, second])
+
+    def test_a_write_still_works_after_a_corrupt_line(self):
+        self.corrupt()
+        code, _, err = self.run_cli("set-weight", self.clean,
+                                    "--symbol", "NVDA", "--weight", "100")
+        self.assertEqual(code, 0, err)
+
+
+class TestRealizedPnlIsProtected(CliTestCase):
+    """A sold-out holding has 0 shares but may carry real money."""
+
+    def setUp(self):
+        CliTestCase.setUp(self)
+        self.slug = self.make_basket(name="Pair", symbols="NVDA:50,MSFT:50")
+        # Buy 100 at 10, sell 100 at 18: no shares left, 800.00 realized.
+        batch = orders_response(
+            order(order_id="b1", side="buy", quantity="100",
+                  average_price="10.00",
+                  created_at="2026-01-01T15:00:00Z",
+                  last_transaction_at="2026-01-01T15:00:00Z"),
+            order(order_id="s1", side="sell", quantity="100",
+                  average_price="18.00",
+                  created_at="2026-01-02T15:00:00Z",
+                  last_transaction_at="2026-01-02T15:00:00Z"))
+        code, _, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json", batch,
+            "--order-ids", "b1,s1", "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.realized(), 800.00)
+
+    def realized(self):
+        return self.run_cli("show", self.slug)[1]["totals"]["realized_pnl"]
+
+    def test_remove_holding_refuses_a_sold_out_holding_with_realized_pnl(self):
+        code, _, err = self.run_cli("remove-holding", self.slug,
+                                    "--symbol", "NVDA")
+        self.assertEqual(code, 1)
+        self.assertIn("HOLDING_HAS_REALIZED_PNL", err)
+        self.assertIn("800.00", err)
+        self.assertIn("--force", err)
+        # The refusal changed nothing.
+        self.assertEqual(self.realized(), 800.00)
+
+    def test_force_removes_it_and_warns_about_the_loss(self):
+        code, out, err = self.run_cli("remove-holding", self.slug,
+                                      "--symbol", "NVDA", "--force")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(any("800.00" in w for w in out["warnings"]))
+        self.assertEqual(self.realized(), 0.00)
+
+    def test_delete_refuses_a_basket_that_carries_realized_pnl(self):
+        code, _, err = self.run_cli("delete", self.slug)
+        self.assertEqual(code, 1)
+        self.assertIn("BASKET_HAS_REALIZED_PNL", err)
+        self.assertIn("--force", err)
+        self.assertEqual(self.run_cli("list")[1]["baskets"][0]["slug"],
+                         self.slug)
+
+    def test_delete_force_removes_it_and_warns(self):
+        code, out, err = self.run_cli("delete", self.slug, "--force")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(any("800.00" in w for w in out["warnings"]))
+        self.assertEqual(self.run_cli("list")[1]["baskets"], [])
+
+    def test_a_holding_with_no_history_still_removes_freely(self):
+        code, _, err = self.run_cli("remove-holding", self.slug,
+                                    "--symbol", "MSFT")
+        self.assertEqual(code, 0, err)
+
+
+class TestSlugReuse(CliTestCase):
+    """A deleted basket must not burn its order ids forever."""
+
+    def test_delete_then_recreate_can_record_the_same_order(self):
+        slug = self.make_basket(name="Solo", symbols="NVDA:100")
+        response = orders_response(order(order_id="o1"))
+        code, _, err = self.run_cli("record-fills", slug, "--orders-json",
+                                    response, "--order-ids", "o1",
+                                    "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        code, _, err = self.run_cli("delete", slug, "--force")
+        self.assertEqual(code, 0, err)
+
+        again = self.make_basket(name="Solo", symbols="NVDA:100")
+        self.assertEqual(again, slug)
+        code, out, err = self.run_cli("record-fills", again, "--orders-json",
+                                      response, "--order-ids", "o1",
+                                      "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["o1"])
+        self.assertEqual(out["already_recorded"], [])
+        # The shares reach the new basket instead of vanishing.
+        shown = self.run_cli("show", again)[1]
+        position = [h for h in shown["holdings"]
+                    if h["symbol"] == "NVDA"][0]["position"]
+        self.assertIsNotNone(position)
+        self.assertEqual(position["shares"], 10.0)
+
+    def test_a_deleted_basket_frees_its_order_for_a_different_basket(self):
+        first = self.make_basket(name="First", symbols="NVDA:100")
+        response = orders_response(order(order_id="o1"))
+        self.run_cli("record-fills", first, "--orders-json", response,
+                     "--order-ids", "o1", "--account", "000000000")
+        self.run_cli("delete", first, "--force")
+
+        second = self.make_basket(name="Second", symbols="NVDA:100")
+        code, out, err = self.run_cli("record-fills", second, "--orders-json",
+                                      response, "--order-ids", "o1",
+                                      "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["o1"])
+
+    def test_a_live_cross_basket_duplicate_is_still_skipped(self):
+        # The guarantee that matters: while both baskets are live, one order
+        # can fund only one of them.
+        first = self.make_basket(name="First", symbols="NVDA:100")
+        second = self.make_basket(name="Second", symbols="NVDA:100")
+        response = orders_response(order(order_id="o1"))
+        code, _, err = self.run_cli("record-fills", first, "--orders-json",
+                                    response, "--order-ids", "o1",
+                                    "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        code, _, err = self.run_cli("record-fills", second, "--orders-json",
+                                    response, "--order-ids", "o1",
+                                    "--account", "000000000")
+        self.assertEqual(code, 1)
+        self.assertIn("ORDER_IN_OTHER_BASKET", err)
+
+    def test_history_keeps_both_lifetimes(self):
+        slug = self.make_basket(name="Solo", symbols="NVDA:100")
+        self.run_cli("delete", slug)
+        self.make_basket(name="Solo", symbols="NVDA:100")
+        events = self.run_cli("history", slug)[1]["events"]
+        created = [e for e in events if e["type"] == "basket_created"]
+        self.assertEqual(len(created), 2)
+        self.assertEqual(len([e for e in events
+                              if e["type"] == "basket_deleted"]), 1)
+
+
+class TestVerifyWarnsWithoutLocking(CliTestCase):
+    """These run in-process, because the flag is what is being patched."""
+
+    def setUp(self):
+        CliTestCase.setUp(self)
+        self.slug = self.make_basket(name="Solo", symbols="NVDA:100")
+        self.saved = basket_events.LOCKING_AVAILABLE
+
+    def tearDown(self):
+        basket_events.LOCKING_AVAILABLE = self.saved
+        CliTestCase.tearDown(self)
+
+    def verify(self):
+        args = basket.build_parser().parse_args(
+            ["verify", "--data-dir", str(self.data_dir)])
+        return basket.cmd_verify(args, basket.Store(self.data_dir))
+
+    def test_verify_warns_when_locking_is_unavailable(self):
+        basket_events.LOCKING_AVAILABLE = False
+        payload = self.verify()
+        self.assertFalse(payload["locking_available"])
+        self.assertTrue(any("no file locking" in w for w in payload["warnings"]),
+                        payload["warnings"])
+
+    def test_verify_does_not_warn_when_locking_works(self):
+        payload = self.verify()
+        self.assertTrue(payload["locking_available"])
+        self.assertFalse(any("no file locking" in w
+                             for w in payload["warnings"]))
+
+    def test_the_tool_still_writes_and_reads_without_locking(self):
+        basket_events.LOCKING_AVAILABLE = False
+        args = basket.build_parser().parse_args(
+            ["add-holding", self.slug, "--symbol", "MSFT", "--weight", "40",
+             "--data-dir", str(self.data_dir)])
+        basket.cmd_add_holding(args, basket.Store(self.data_dir))
+        # Read it back through the subprocess path, which uses the real flag.
+        shown = self.run_cli("show", self.slug)[1]
+        self.assertEqual(sorted(h["symbol"] for h in shown["holdings"]),
+                         ["MSFT", "NVDA"])
+
+
+class TestPriceParsing(CliTestCase):
+
+    def test_a_non_numeric_price_is_a_json_error_not_a_traceback(self):
+        slug = self.make_basket(name="Solo", symbols="NVDA:100")
+        code, _, err = self.run_cli("show", slug, "--prices", '{"NVDA":"abc"}')
+        self.assertEqual(code, 1)
+        self.assertNotIn("Traceback", err)
+        envelope = json.loads(err)
+        self.assertEqual(envelope["code"], "BAD_PRICE")
+        self.assertEqual(envelope["detail"]["symbol"], "NVDA")
+
+    def test_a_null_price_is_a_json_error(self):
+        slug = self.make_basket(name="Solo", symbols="NVDA:100")
+        code, _, err = self.run_cli("plan-buy", slug, "--amount", "100",
+                                    "--prices", '{"NVDA":null}')
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(err)["code"], "BAD_PRICE")
+
+    def test_a_numeric_string_price_still_works(self):
+        slug = self.make_basket(name="Solo", symbols="NVDA:100")
+        code, out, err = self.run_cli("plan-buy", slug, "--amount", "100",
+                                      "--prices", '{"NVDA":"50.5"}')
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["orders"][0]["price"], 50.5)
+
+
 class TestPlanning(CliTestCase):
 
     def setUp(self):
@@ -645,13 +1074,19 @@ class TestVerifyAndBackup(CliTestCase):
         self.assertEqual(len(out["ignored_events"]), 1)
         self.assertEqual(out["ignored_events"][0]["order_id"], "b1")
 
-    def test_a_corrupt_line_exits_three(self):
+    def test_a_corrupt_line_exits_three_and_names_the_line(self):
         log = self.data_dir / "events.log.jsonl"
+        line_number = len(log.read_text().splitlines()) + 1
         with log.open("a") as handle:
             handle.write("{broken\n")
-        code, _, err = self.run_cli("verify")
+        code, out, err = self.run_cli("verify")
+        # The integrity signal stays. verify now still prints its whole
+        # report, so the user learns which line to repair and which baskets
+        # replayed cleanly.
         self.assertEqual(code, 3)
-        self.assertIn("CORRUPT_LOG_LINE", err)
+        self.assertEqual(out["code"], "CORRUPT_LOG_LINE")
+        self.assertEqual([c["line"] for c in out["corrupt_lines"]], [line_number])
+        self.assertTrue(any("not valid JSON" in w for w in out["warnings"]))
 
     def test_backup_writes_a_copy_and_a_marker(self):
         code, out, err = self.run_cli("backup")

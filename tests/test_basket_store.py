@@ -223,6 +223,121 @@ class TestReplayDedupe(unittest.TestCase):
         self.assertEqual(result.order_index["o1"], "mag7")
 
 
+class TestOrderIndexLifetimes(unittest.TestCase):
+    """The order index must follow the same lifetimes as the baskets.
+
+    A global index spanning every lifetime meant that deleting a basket and
+    creating one with the same name burned every order id the old basket had
+    recorded: the new basket could never take them, and its shares could
+    never be attributed to anything.
+    """
+
+    def deleted(self, slug="mag7"):
+        return make_event("basket_deleted", slug, ts="2026-07-26T00:00:00Z")
+
+    def test_a_delete_releases_the_orders_it_claimed(self):
+        result = replay([created(), holding(), buy(order_id="o1"),
+                         self.deleted()])
+        self.assertNotIn("o1", result.order_index)
+
+    def test_the_recreated_slug_can_record_the_same_order(self):
+        events = [created(), holding(), buy(order_id="o1"), self.deleted(),
+                  created(ts="2026-07-27T00:00:00Z"), holding(),
+                  buy(order_id="o1", ts="2026-07-27T01:00:00Z")]
+        result = replay(events)
+        # The buy applied to the new lifetime instead of being ignored.
+        self.assertEqual(result.ignored, [])
+        self.assertEqual(result.order_index["o1"], "mag7")
+        position = result.baskets["mag7"].holdings["NVDA"].position
+        self.assertEqual(position.shares, 10.0)
+
+    def test_a_different_basket_can_take_a_deleted_baskets_order(self):
+        events = [created(slug="a", name="A"), holding(slug="a"),
+                  buy(slug="a", order_id="o1"),
+                  make_event("basket_deleted", "a", ts="2026-07-26T00:00:00Z"),
+                  created(slug="b", name="B"), holding(slug="b"),
+                  buy(slug="b", order_id="o1", ts="2026-07-27T00:00:00Z")]
+        result = replay(events)
+        self.assertEqual(result.ignored, [])
+        self.assertEqual(result.order_index["o1"], "b")
+        self.assertEqual(result.baskets["b"].holdings["NVDA"].position.shares,
+                         10.0)
+
+    def test_two_live_baskets_still_cannot_share_an_order(self):
+        # The guarantee the lifetime scoping must not weaken.
+        events = [created(slug="a", name="A"), holding(slug="a"),
+                  created(slug="b", name="B"), holding(slug="b"),
+                  buy(slug="a", order_id="o1"),
+                  buy(slug="b", order_id="o1")]
+        result = replay(events)
+        self.assertEqual(len(result.ignored), 1)
+        self.assertEqual(result.order_index["o1"], "a")
+        self.assertEqual(result.baskets["b"].holdings["NVDA"].position.shares,
+                         0.0)
+
+    def test_a_duplicate_within_one_lifetime_is_still_ignored(self):
+        result = replay([created(), holding(), buy(order_id="dup"),
+                         buy(order_id="dup")])
+        self.assertEqual(len(result.ignored), 1)
+        self.assertEqual(
+            result.baskets["mag7"].holdings["NVDA"].position.shares, 10.0)
+
+
+class TestLastFillTime(unittest.TestCase):
+    """Each holding remembers its latest fill time, by trade time."""
+
+    def test_a_holding_with_no_trades_has_no_fill_time(self):
+        basket = replay([created(), holding()]).baskets["mag7"]
+        self.assertEqual(basket.holdings["NVDA"].last_fill_ts, "")
+
+    def test_the_latest_time_wins_regardless_of_log_order(self):
+        events = [created(), holding(),
+                  buy(order_id="o1", ts="2026-07-24T00:00:00Z"),
+                  buy(order_id="o2", ts="2026-07-22T00:00:00Z")]
+        basket = replay(events).baskets["mag7"]
+        self.assertEqual(basket.holdings["NVDA"].last_fill_ts,
+                         "2026-07-24T00:00:00Z")
+
+    def test_mixed_precision_times_compare_correctly(self):
+        events = [created(), holding(),
+                  buy(order_id="o1", ts="2026-07-24T00:00:00Z"),
+                  buy(order_id="o2", ts="2026-07-24T00:00:00.500Z")]
+        basket = replay(events).baskets["mag7"]
+        self.assertEqual(basket.holdings["NVDA"].last_fill_ts,
+                         "2026-07-24T00:00:00.500Z")
+
+    def test_an_unreadable_time_is_not_adopted(self):
+        events = [created(), holding(),
+                  buy(order_id="o1", ts="2026-07-24T00:00:00Z"),
+                  buy(order_id="o2", ts="not a date")]
+        basket = replay(events).baskets["mag7"]
+        self.assertEqual(basket.holdings["NVDA"].last_fill_ts,
+                         "2026-07-24T00:00:00Z")
+
+    def test_each_symbol_tracks_its_own_time(self):
+        events = [created(), holding(symbol="NVDA"), holding(symbol="MSFT"),
+                  buy(symbol="NVDA", order_id="o1", ts="2026-07-24T00:00:00Z"),
+                  buy(symbol="MSFT", order_id="o2", ts="2026-07-20T00:00:00Z")]
+        basket = replay(events).baskets["mag7"]
+        self.assertEqual(basket.holdings["NVDA"].last_fill_ts,
+                         "2026-07-24T00:00:00Z")
+        self.assertEqual(basket.holdings["MSFT"].last_fill_ts,
+                         "2026-07-20T00:00:00Z")
+
+
+class TestReplayCarriesCorruptLines(unittest.TestCase):
+
+    def test_corrupt_lines_ride_along_on_the_result(self):
+        corrupt = [{"line": 3, "raw": "{broken"}]
+        result = replay([created(), holding()], corrupt)
+        self.assertEqual(result.corrupt, corrupt)
+        # The baskets whose events did parse are unaffected.
+        self.assertIn("mag7", result.baskets)
+
+    def test_corrupt_defaults_to_empty(self):
+        self.assertEqual(replay([created()]).corrupt, [])
+
+
 class TestSnapshotDict(unittest.TestCase):
 
     def test_shape_matches_the_spec(self):
