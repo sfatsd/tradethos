@@ -225,7 +225,14 @@ def snapshot_dict(basket):
     holdings = []
     for holding in basket.holdings.values():
         position = None
-        if holding.has_position:
+        # A holding that was bought and then fully sold has shares == 0, so
+        # has_position (shares > 0) is False - but its realized_pnl must
+        # still show here, or a profit or loss vanishes from the one place a
+        # user checks a single symbol. basket.realized_pnl (the total) never
+        # loses it either way; only the per-holding breakdown is at risk. A
+        # holding that was never bought has realized_pnl == 0.0 too, so it
+        # still reports position: null.
+        if holding.has_position or holding.position.realized_pnl != 0:
             position = {
                 "shares": round(holding.position.shares, 6),
                 "avg_cost": round(holding.position.avg_cost, 4),

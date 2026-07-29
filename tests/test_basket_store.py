@@ -241,6 +241,20 @@ class TestSnapshotDict(unittest.TestCase):
         data = snapshot_dict(replay([created(), holding()]).baskets["mag7"])
         self.assertIsNone(data["holdings"][0]["position"])
 
+    def test_a_fully_sold_holding_still_reports_its_realized_pnl(self):
+        # Selling every share zeroes shares and avg_cost but must not hide
+        # the accumulated profit or loss. The basket-level totals.realized_pnl
+        # already carries it; the per-holding block must too.
+        events = [created(), holding(),
+                 buy(shares=10.0, price=50.0, order_id="o1"),
+                 sell(shares=10.0, price=70.0, order_id="o2")]
+        data = snapshot_dict(replay(events).baskets["mag7"])
+        position = data["holdings"][0]["position"]
+        self.assertIsNotNone(position)
+        self.assertEqual(position["shares"], 0.0)
+        self.assertEqual(position["avg_cost"], 0.0)
+        self.assertEqual(position["realized_pnl"], 200.0)
+
 
 class TestOversellClamping(unittest.TestCase):
 

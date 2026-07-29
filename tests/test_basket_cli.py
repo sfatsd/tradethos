@@ -432,14 +432,27 @@ class TestRecordFills(CliTestCase):
         self.assertEqual(out["capped"][0]["recorded_shares"], 10.0)
         shown = self.run_cli("show", self.slug)[1]
         position = [h for h in shown["holdings"] if h["symbol"] == "NVDA"][0]["position"]
-        # Holding.has_position (established in Task 3) is shares > 0, so
-        # snapshot_dict reports a fully sold-out holding as position=None,
-        # the same convention test_show_reports_targets_and_no_position
-        # relies on for a holding that never bought. The brief's literal
-        # assertion here (position["shares"] == 0.0) assumes a "position"
-        # dict survives a full sell-out, which basket_store.py (out of
-        # scope for this task) does not do.
-        self.assertIsNone(position)
+        # A fully sold-out holding still reports its realized P&L. Only
+        # shares and avg_cost zero; position itself must not go null, or a
+        # profit or loss vanishes from the one place a user checks a single
+        # symbol (fixed in basket_store.snapshot_dict).
+        self.assertIsNotNone(position)
+        self.assertEqual(position["shares"], 0.0)
+        self.assertEqual(position["realized_pnl"], 200.0)
+
+    def test_a_second_sell_in_one_batch_is_blocked_by_the_first(self):
+        self.record(orders_response(order(order_id="b1", quantity="10")), "b1")
+        batch = orders_response(
+            order(order_id="s1", side="sell", quantity="6", average_price="70.00"),
+            order(order_id="s2", side="sell", quantity="6", average_price="70.00"))
+        code, out, err = self.record(batch, "s1,s2")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["s1"])
+        self.assertEqual(len(out["skipped"]), 1)
+        skipped = out["skipped"][0]
+        self.assertEqual(skipped["order_id"], "s2")
+        self.assertEqual(skipped["reason"], "OVERSELL")
+        self.assertEqual(skipped["held"], 4.0)
 
     def test_cap_at_held_is_refused_for_more_than_one_id(self):
         response = orders_response(order(order_id="a"), order(order_id="b"))
