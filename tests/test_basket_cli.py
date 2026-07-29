@@ -734,6 +734,75 @@ class TestCorruptLineDegrades(CliTestCase):
                                     "--symbol", "NVDA", "--weight", "100")
         self.assertEqual(code, 0, err)
 
+    def test_show_exits_zero_and_warns_of_the_skipped_line(self):
+        number = self.corrupt()
+        code, out, err = self.run_cli("show", self.clean)
+        self.assertEqual(code, 0, err)
+        self.assertIn("warnings", out)
+        self.assertTrue(any(str(number) in w for w in out["warnings"]))
+
+    def test_list_exits_zero_and_warns_of_the_skipped_line(self):
+        number = self.corrupt()
+        code, out, err = self.run_cli("list")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warnings", out)
+        self.assertTrue(any(str(number) in w for w in out["warnings"]))
+
+    def test_history_exits_zero_and_warns_of_the_skipped_line(self):
+        number = self.corrupt()
+        code, out, err = self.run_cli("history", self.clean)
+        self.assertEqual(code, 0, err)
+        self.assertIn("warnings", out)
+        self.assertTrue(any(str(number) in w for w in out["warnings"]))
+
+    def test_export_exits_zero_and_warns_of_the_skipped_line(self):
+        number = self.corrupt()
+        code, out, err = self.run_cli("export")
+        self.assertEqual(code, 0, err)
+        self.assertIn("warnings", out)
+        self.assertTrue(any(str(number) in w for w in out["warnings"]))
+
+    def test_show_reports_no_warnings_key_on_an_intact_log(self):
+        code, out, err = self.run_cli("show", self.clean)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", out)
+
+    def test_list_reports_no_warnings_key_on_an_intact_log(self):
+        code, out, err = self.run_cli("list")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", out)
+
+    def test_history_reports_no_warnings_key_on_an_intact_log(self):
+        code, out, err = self.run_cli("history", self.clean)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", out)
+
+    def test_export_reports_no_warnings_key_on_an_intact_log(self):
+        code, out, err = self.run_cli("export")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("warnings", out)
+
+    def test_a_basket_whose_events_all_parsed_is_still_readable(self):
+        self.corrupt()
+        code, out, err = self.run_cli("show", self.clean)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["slug"], self.clean)
+
+    def test_verify_still_exits_three_on_a_corrupt_line(self):
+        number = self.corrupt()
+        code, out, err = self.run_cli("verify")
+        self.assertEqual(code, 3)
+        self.assertEqual([c["line"] for c in out["corrupt_lines"]], [number])
+
+    def test_list_table_format_reports_the_warning(self):
+        number = self.corrupt()
+        proc = subprocess.run(
+            [sys.executable, str(CLI), "--data-dir", str(self.data_dir),
+             "list", "--format", "table"],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn(str(number), proc.stdout)
+
 
 class TestRealizedPnlIsProtected(CliTestCase):
     """A sold-out holding has 0 shares but may carry real money."""

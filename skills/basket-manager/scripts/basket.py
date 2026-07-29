@@ -79,7 +79,11 @@ class Store(object):
         maybe_backup(self)
 
     def export(self, slugs=None):
-        """Write the snapshot file for the named baskets, or for all of them."""
+        """Write the snapshot file for the named baskets, or for all of them.
+
+        Returns (written, corrupt): the slugs written, and any log lines the
+        replay had to skip, so a caller can report them.
+        """
         result = self.load()
         self.baskets_dir.mkdir(parents=True, exist_ok=True)
         written = []
@@ -89,7 +93,7 @@ class Store(object):
             path = self.baskets_dir / (slug + ".json")
             path.write_text(json.dumps(snapshot_dict(basket), indent=2) + "\n")
             written.append(slug)
-        return written
+        return written, result.corrupt
 
 
 def parse_symbol_weights(text):
@@ -240,6 +244,23 @@ def basket_view(basket, prices=None):
     return data
 
 
+def corrupt_line_warnings(corrupt):
+    """Build one warning message per log line the replay had to skip.
+
+    `verify` and every read command (`show`, `list`, `history`, `export`)
+    call this on the same `corrupt` list that `EventLog.read_with_corruption`
+    produces, so a skipped line is always reported the same way, wherever it
+    surfaces. A command whose data came back incomplete must say so; it must
+    never just look right.
+    """
+    return [
+        "Line %d of the event log is not valid JSON, so the replay "
+        "skipped it: %r. Edit or remove that line."
+        % (entry["line"], entry["raw"][:80])
+        for entry in corrupt
+    ]
+
+
 # --- commands ---------------------------------------------------------------
 
 def cmd_create(args, store):
@@ -285,21 +306,28 @@ def cmd_list(args, store):
             "total_invested": round(basket.total_invested, 2),
             "realized_pnl": round(basket.realized_pnl, 2),
         })
-    return {"baskets": rows}
+    payload = {"baskets": rows}
+    if result.corrupt:
+        payload["warnings"] = corrupt_line_warnings(result.corrupt)
+    return payload
 
 
 def cmd_show(args, store):
-    _, basket = store.require(args.slug)
+    result, basket = store.require(args.slug)
     if not basket.holdings:
         raise CliError("The basket %r holds no symbols. Add a holding first."
                        % args.slug, "EMPTY_BASKET", {"slug": args.slug})
-    return basket_view(basket, parse_prices(args.prices))
+    view = basket_view(basket, parse_prices(args.prices))
+    if result.corrupt:
+        view["warnings"] = corrupt_line_warnings(result.corrupt)
+    return view
 
 
 def cmd_history(args, store):
     # A corrupt line is skipped, not fatal: the history of every other basket
-    # stays readable. `verify` is the command that reports the bad lines.
-    events = store.log.read()
+    # stays readable. It still surfaces here in `warnings`, so a user reading
+    # history knows the record is incomplete.
+    events, corrupt = store.log.read_with_corruption()
     rows = []
     for event in events:
         if args.slug and event.get("slug") != args.slug:
@@ -309,12 +337,19 @@ def cmd_history(args, store):
         if args.since and event.get("ts", "") < args.since:
             continue
         rows.append(event)
-    return {"events": rows}
+    payload = {"events": rows}
+    if corrupt:
+        payload["warnings"] = corrupt_line_warnings(corrupt)
+    return payload
 
 
 def cmd_export(args, store):
     slugs = {args.slug} if args.slug else None
-    return {"exported": store.export(slugs)}
+    written, corrupt = store.export(slugs)
+    payload = {"exported": written}
+    if corrupt:
+        payload["warnings"] = corrupt_line_warnings(corrupt)
+    return payload
 
 
 def _apply_weights(store, args, slug, basket, new_weights, extra_events=()):
@@ -965,11 +1000,7 @@ def cmd_verify(args, store):
     # A corrupt line is reported here rather than raised at load time, so the
     # report still names every basket that did replay. The command still exits
     # 3, because the store's integrity is in question.
-    for entry in result.corrupt:
-        warnings.append(
-            "Line %d of the event log is not valid JSON, so the replay "
-            "skipped it: %r. Edit or remove that line."
-            % (entry["line"], entry["raw"][:80]))
+    warnings.extend(corrupt_line_warnings(result.corrupt))
 
     if not basket_events.LOCKING_AVAILABLE:
         warnings.append(
@@ -1062,6 +1093,8 @@ def print_table(command, payload):
         for row in payload["baskets"]:
             print("%-28s %-10d %12.2f" % (
                 row["name"], row["holdings"], row["total_invested"]))
+        for warning in payload.get("warnings", []):
+            print("WARNING: %s" % warning)
         return
     print(json.dumps(payload, indent=2))
 
