@@ -13,8 +13,12 @@ docs/superpowers/plans/2026-07-29-local-basket-storage-stage2.md.
 """
 
 import argparse
+import base64
+import datetime
 import json
+import re
 import sys
+import zlib
 from pathlib import Path
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -23,10 +27,88 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from basket_events import EPOCH, EventLog, make_event, parse_timestamp
 from basket_store import replay, slugify
-from basket_utils import MAX_SLUG_LENGTH, decode_watchlist_metadata
 from basket_weights import WeightError, normalize_weights
 
 DEFAULT_DATA_DIR = Path.home() / ".tradethos"
+
+# The old cloud format truncated a basket's slug to this many characters, so
+# it would fit the compressed metadata into a watchlist description. This
+# migration is the last reader of that format; the limit stays here only to
+# recognize a truncated slug. See resolve_slug below.
+MAX_SLUG_LENGTH = 24
+
+
+def decode_watchlist_metadata(display_description):
+    """Decode the old `Z64:` cloud metadata format from a watchlist description.
+
+    This is the one piece of `basket_utils.py` that the migration still
+    needs, moved here when that module was deleted in Stage 3. It reads the
+    old format; it writes nothing. Handles 'Z64:' compressed Base64, raw
+    JSON `{"s":...}`, and the legacy `[BASKET_MODEL]` format.
+
+    Returns a dict with `slug`, `weights`, `threshold`, and `snapshot`, or
+    None when the description does not decode as basket metadata.
+    """
+    if not display_description:
+        return None
+
+    desc_str = display_description.strip()
+    json_text = None
+
+    if desc_str.startswith("Z64:"):
+        try:
+            b64_payload = desc_str[4:]
+            compressed = base64.b64decode(b64_payload.encode("utf-8"))
+            json_text = zlib.decompress(compressed).decode("utf-8")
+        except Exception:
+            return None
+    elif desc_str.startswith("[BASKET_MODEL]"):
+        match = re.search(r"\[BASKET_MODEL\]\s*(\{.*\})", desc_str)
+        if not match:
+            return None
+        json_text = match.group(1)
+    elif desc_str.startswith("{") and desc_str.endswith("}"):
+        json_text = desc_str
+    else:
+        return None
+
+    try:
+        data = json.loads(json_text)
+    except ValueError:
+        return None
+
+    if "s" not in data or "w" not in data:
+        return data
+
+    slug = data.get("s")
+    raw_w = data.get("w", {})
+    target_weights = {}
+    snap_h = {}
+    for sym, lst in raw_w.items():
+        sym = sym.upper()
+        if isinstance(lst, (list, tuple)) and len(lst) > 0:
+            target_weights[sym] = float(lst[0])
+            if len(lst) >= 3:
+                snap_h[sym] = [float(lst[1]), float(lst[2])]
+        elif isinstance(lst, (int, float)):
+            target_weights[sym] = float(lst)
+
+    ts_val = data.get("t")
+    iso_ts = None
+    if ts_val:
+        iso_ts = datetime.datetime.fromtimestamp(
+            ts_val, tz=datetime.timezone.utc).isoformat()
+
+    snapshot = None
+    if iso_ts and snap_h:
+        snapshot = {"ts": iso_ts, "h": snap_h}
+
+    return {
+        "slug": slug,
+        "weights": target_weights,
+        "threshold": float(data.get("th", 5.0)),
+        "snapshot": snapshot,
+    }
 
 EXIT_OK = 0
 EXIT_VALIDATION = 1

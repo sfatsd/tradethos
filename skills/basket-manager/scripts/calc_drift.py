@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Calculate weight drift for basket holdings against target allocations.
 
-Compares actual weights (based on current market value) to target weights
-and flags holdings that exceed the configured drift threshold.
+Compares the actual weight (by current market value) to the target weight
+and flags a holding that exceeds the drift threshold. It reads baskets from
+the local event-log store by replaying the log itself. It writes nothing.
 
 Usage:
-    python3 skills/basket-manager/scripts/calc_drift.py --basket storage-and-memory-index \
-      --prices '{"WDC":560.00,"STX":920.00,"MU":985.19,"SNDK":1612.08,"MRVL":209.92,"LITE":832.18}'
+    python3 skills/basket-manager/scripts/calc_drift.py --slug storage-leaders \\
+      --prices '{"WDC":60.00,"STX":92.00,"MU":98.50}'
 
-    python3 skills/basket-manager/scripts/calc_drift.py --all \
-      --prices '{"WDC":560.00,...}' --threshold 3.0
+    python3 skills/basket-manager/scripts/calc_drift.py --all \\
+      --prices '{"WDC":60.00,...}' --threshold 3.0
 """
 
 import argparse
@@ -17,31 +18,18 @@ import json
 import sys
 from pathlib import Path
 
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
 
-# Add basket-manager scripts directory to sys.path
-scripts_dir = Path(__file__).resolve().parent
-sys.path.insert(0, str(scripts_dir))
+from basket_events import EventLog
+from basket_store import replay, snapshot_dict
 
-from basket_utils import (
-    iter_watchlist_baskets,
-    parse_watchlists_json,
-    watchlist_to_basket_dict,
-)
+DEFAULT_DATA_DIR = Path.home() / ".tradethos"
 
 
-def find_baskets_dir() -> Path:
-    """Dynamically locate the data/baskets directory by traversing upwards."""
-    curr = Path(__file__).resolve().parent
-    while curr != curr.parent:
-        target = curr / "data" / "baskets"
-        if target.exists():
-            return target
-        curr = curr.parent
-    return Path(__file__).resolve().parents[3] / "data" / "baskets"
-
-
-def find_config_path() -> Path:
-    """Dynamically locate config.json by traversing upwards."""
+def find_config_path():
+    """Locate config.json by walking up from this file."""
     curr = Path(__file__).resolve().parent
     while curr != curr.parent:
         target = curr / "config.json"
@@ -51,14 +39,13 @@ def find_config_path() -> Path:
     return Path(__file__).resolve().parents[3] / "config.json"
 
 
-BASKETS_DIR = find_baskets_dir()
 CONFIG_PATH = find_config_path()
 
 DEFAULT_REBALANCE_THRESHOLD = 5.0
 DEFAULT_ON_TARGET_THRESHOLD = 2.0
 
 
-def load_config() -> dict:
+def load_config():
     """Load project config for threshold defaults."""
     if CONFIG_PATH.exists():
         with open(CONFIG_PATH) as f:
@@ -66,13 +53,15 @@ def load_config() -> dict:
     return {}
 
 
-def load_basket(filepath: Path) -> dict:
-    with open(filepath) as f:
-        return json.load(f)
+def load_baskets(data_dir):
+    """Replay the event log. Return {slug: snapshot_dict}."""
+    events, corrupt = EventLog(data_dir).read_with_corruption()
+    result = replay(events, corrupt)
+    return dict((slug, snapshot_dict(b)) for slug, b in result.baskets.items())
 
 
-def classify_drift(drift_abs: float, on_target_threshold: float, rebalance_threshold: float) -> str:
-    """Classify drift level: on_target, minor_drift, or significant_drift."""
+def classify_drift(drift_abs, on_target_threshold, rebalance_threshold):
+    """Classify a drift level: on_target, minor_drift, or significant_drift."""
     if drift_abs <= on_target_threshold:
         return "on_target"
     elif drift_abs <= rebalance_threshold:
@@ -81,11 +70,10 @@ def classify_drift(drift_abs: float, on_target_threshold: float, rebalance_thres
         return "significant_drift"
 
 
-def calc_basket_drift(data: dict, prices: dict, threshold: float, on_target: float) -> dict:
-    """Calculate drift for all holdings in a basket."""
+def calc_basket_drift(data, prices, threshold, on_target):
+    """Calculate the drift of every holding in one basket."""
     holdings = data.get("holdings", [])
 
-    # Calculate current value per holding
     holding_values = []
     for h in holdings:
         symbol = h["symbol"]
@@ -108,7 +96,6 @@ def calc_basket_drift(data: dict, prices: dict, threshold: float, on_target: flo
 
     total_value = sum(hv["current_value"] for hv in holding_values)
 
-    # Calculate actual weights and drift
     drift_results = []
     flagged = []
     for hv in holding_values:
@@ -126,10 +113,10 @@ def calc_basket_drift(data: dict, prices: dict, threshold: float, on_target: flo
         }
 
         if not hv["has_position"]:
-            entry["note"] = "No position — actual weight is 0%"
+            entry["note"] = "No position. The actual weight is 0%."
             entry["status"] = "significant_drift" if hv["target_weight_pct"] > 0 else "on_target"
         elif not hv["has_price"]:
-            entry["note"] = f"No price provided for {hv['symbol']}"
+            entry["note"] = "No price given for %s" % hv["symbol"]
 
         drift_results.append(entry)
         if entry["status"] == "significant_drift":
@@ -146,16 +133,16 @@ def calc_basket_drift(data: dict, prices: dict, threshold: float, on_target: flo
     }
 
 
-def get_basket_files(basket_slug: str = None, all_baskets: bool = False) -> list[Path]:
-    if basket_slug:
-        target = BASKETS_DIR / f"{basket_slug}.json"
-        if not target.exists():
-            print(f"Error: Basket '{basket_slug}' not found at {target}", file=sys.stderr)
+def select_baskets(baskets, slug, all_baskets):
+    if slug:
+        if slug not in baskets:
+            print("Error: Basket %r not found. Available slugs: %s"
+                  % (slug, ", ".join(sorted(baskets)) or "(none)"), file=sys.stderr)
             sys.exit(1)
-        return [target]
+        return [baskets[slug]]
     if all_baskets:
-        return sorted(p for p in BASKETS_DIR.glob("*.json") if p.name != ".gitkeep")
-    print("Error: Specify --basket <slug> or --all", file=sys.stderr)
+        return [baskets[s] for s in sorted(baskets)]
+    print("Error: Specify --slug <slug> or --all", file=sys.stderr)
     sys.exit(1)
 
 
@@ -167,75 +154,66 @@ def main():
 
     parser = argparse.ArgumentParser(description="Calculate basket weight drift")
     group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--basket", help="Basket slug (e.g. storage-and-memory-index)")
-    group.add_argument("--all", action="store_true", help="Process all baskets")
-    group.add_argument("--watchlists-json", help="JSON array of watchlists returned by get_watchlists")
+    group.add_argument("--slug", help="Basket slug (e.g. storage-leaders)")
+    group.add_argument("--all", action="store_true", help="Process every basket")
+    parser.add_argument("--data-dir", default=None,
+                        help="The event-log directory. Default: ~/.tradethos")
     parser.add_argument("--prices", required=True,
                         help="JSON object of symbol:price pairs")
     parser.add_argument("--threshold", type=float, default=None,
-                        help="Drift threshold %% to flag — overrides per-basket metadata "
-                             f"(default: per-basket value, else {default_threshold})")
+                        help="Drift threshold percent to flag. Overrides the basket's own "
+                             "rebalance_threshold_pct (default: per-basket value, else %s)"
+                             % default_threshold)
     parser.add_argument("--format", choices=["json", "table"], default="json",
                         help="Output format (default: json)")
     args = parser.parse_args()
 
     try:
         prices = json.loads(args.prices)
-    except json.JSONDecodeError as e:
-        print(f"Error: Invalid JSON in --prices: {e}", file=sys.stderr)
+    except ValueError as error:
+        print("Error: Invalid JSON in --prices: %s" % error, file=sys.stderr)
         sys.exit(1)
 
-    results = []
-
-    def resolve_threshold(basket: dict) -> float:
-        """An explicit --threshold outranks per-basket metadata, which outranks config."""
+    def resolve_threshold(basket):
+        """An explicit --threshold outranks the basket's own field, which outranks config.json."""
         if args.threshold is not None:
             return args.threshold
         return basket.get("rebalance_threshold_pct", default_threshold)
 
-    if args.watchlists_json:
-        try:
-            wl_list = parse_watchlists_json(args.watchlists_json)
-        except (json.JSONDecodeError, ValueError) as e:
-            print(f"Error parsing --watchlists-json: {e}", file=sys.stderr)
-            sys.exit(1)
-
-        for name, desc, _metadata in iter_watchlist_baskets(wl_list):
-            b_dict = watchlist_to_basket_dict(name, desc)
-            results.append(
-                calc_basket_drift(b_dict, prices, resolve_threshold(b_dict), default_on_target)
-            )
-    else:
-        basket_files = get_basket_files(args.basket, args.all)
-        for filepath in basket_files:
-            data = load_basket(filepath)
-            results.append(
-                calc_basket_drift(data, prices, resolve_threshold(data), default_on_target)
-            )
+    data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
+    baskets = load_baskets(data_dir)
+    chosen = select_baskets(baskets, args.slug, args.all)
+    results = [calc_basket_drift(data, prices, resolve_threshold(data), default_on_target)
+               for data in chosen]
 
     if args.format == "json":
         output = results[0] if len(results) == 1 else {"baskets": results}
         print(json.dumps(output, indent=2))
     else:
         for drift in results:
-            print(f"\n{'=' * 70}")
-            print(f"  {drift['basket']}  (threshold: ±{drift['threshold_pct']}%)")
-            print(f"  Total Value: ${drift['total_value']:,.2f}")
-            print(f"{'=' * 70}")
+            print("\n%s" % ("=" * 70))
+            print("  %s  (threshold: +/-%s%%)" % (drift["basket"], drift["threshold_pct"]))
+            print("  Total Value: $%s" % format(drift["total_value"], ",.2f"))
+            print("=" * 70)
 
-            status_icons = {"on_target": "✅", "minor_drift": "⚠️", "significant_drift": "🔴"}
-            header = f"{'Symbol':<8} | {'Target':>8} | {'Actual':>8} | {'Drift':>8} | {'Status':<20}"
+            status_marks = {"on_target": "OK", "minor_drift": "WATCH",
+                            "significant_drift": "REBALANCE"}
+            header = "%-8s | %8s | %8s | %8s | %-20s" % (
+                "Symbol", "Target", "Actual", "Drift", "Status")
             print(header)
             print("-" * len(header))
             for h in drift["holdings"]:
-                icon = status_icons.get(h["status"], "?")
-                drift_str = f"{'+' if h['drift_pct'] >= 0 else ''}{h['drift_pct']:.2f}%"
-                print(f"{h['symbol']:<8} | {h['target_weight_pct']:>7.2f}% | {h['actual_weight_pct']:>7.2f}% | {drift_str:>8} | {icon} {h['status']}")
+                mark = status_marks.get(h["status"], "?")
+                drift_str = "%s%.2f%%" % ("+" if h["drift_pct"] >= 0 else "", h["drift_pct"])
+                print("%-8s | %7.2f%% | %7.2f%% | %8s | %s %s" % (
+                    h["symbol"], h["target_weight_pct"], h["actual_weight_pct"],
+                    drift_str, mark, h["status"]))
 
             if drift["rebalance_needed"]:
-                print(f"\n⚠️  Rebalance suggested for: {', '.join(drift['flagged'])}")
+                print("\nRebalance suggested for: %s" % ", ".join(drift["flagged"]))
             else:
-                print(f"\n✅ All holdings within ±{drift['threshold_pct']}% drift tolerance")
+                print("\nAll holdings are within +/-%s%% drift tolerance"
+                      % drift["threshold_pct"])
 
 
 if __name__ == "__main__":
