@@ -23,7 +23,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from basket_events import EPOCH, EventLog, make_event, parse_timestamp
 from basket_store import replay, slugify
-from basket_utils import decode_watchlist_metadata
+from basket_utils import MAX_SLUG_LENGTH, decode_watchlist_metadata
 from basket_weights import WeightError, normalize_weights
 
 DEFAULT_DATA_DIR = Path.home() / ".tradethos"
@@ -318,7 +318,42 @@ def _sort_order_ids_by_fill_time(order_ids, order_index):
     return [row[3] for row in decorated]
 
 
-def _build_basket_plans(baskets, assignments, orders, theses):
+def resolve_slug(old_slug, display_name):
+    """Return the slug a migrated basket should use.
+
+    Prefers the slug already stored in the metadata — regenerating it from
+    the display name unconditionally (the original behavior) changed five
+    of the six live slugs, most of which were fine as-is. Regeneration
+    happens only when:
+
+    - the stored slug is missing/empty, or
+    - the stored slug carries the unmistakable signature of the old
+      format's truncation at `MAX_SLUG_LENGTH` (24) characters.
+
+    Detecting a genuine truncation takes one wrinkle into account: the old
+    (now-obsolete) encoder spelled "&" out as "and" rather than dropping it
+    the way `basket_store.slugify` does, so a truncated slug like
+    "optical-and-photonics-in" no longer reads as a literal prefix of
+    today's regenerated "optical-photonics-index". Reconstructing the
+    pre-truncation slug the old way (spelling "&" back out) recovers that
+    relationship. A stored slug that merely happens to be 24 characters
+    long but whose full reconstructed form was never longer than the cap —
+    e.g. "storage-and-memory-index", which IS 24 characters whole — was
+    never actually cut short, and is left alone.
+    """
+    old_slug = (old_slug or "").strip()
+    regenerated = slugify(display_name)
+    if not old_slug:
+        return regenerated
+    if len(old_slug) == MAX_SLUG_LENGTH:
+        legacy_full = slugify(display_name.replace("&", " and "))
+        if (len(legacy_full) > MAX_SLUG_LENGTH
+                and legacy_full[:MAX_SLUG_LENGTH] == old_slug):
+            return regenerated
+    return old_slug
+
+
+def _build_basket_plans(baskets, assignments, orders, theses, account):
     """Return one plan dict per basket: its events, and the fields the report needs.
 
     `build_events` and `migrate` both drive from this, so the slug rule, the
@@ -335,15 +370,21 @@ def _build_basket_plans(baskets, assignments, orders, theses):
     plans = []
     for basket in baskets:
         old_slug = basket["slug"]
-        new_slug = slugify(basket["name"])
+        new_slug = resolve_slug(old_slug, basket["name"])
         normalized, changed = normalize_basket_weights(basket["weights"])
-        basket_theses = theses.get(new_slug) or {}
+        # Legacy theses are keyed by slugify(name) (see read_legacy_theses),
+        # which is not always this basket's final slug now that resolve_slug
+        # can keep the stored one — fall back to the name-derived key so a
+        # kept slug does not silently lose its carried-over thesis text.
+        basket_theses = (theses.get(new_slug)
+                         or theses.get(slugify(basket["name"]))
+                         or {})
 
         events = [make_event(
             "basket_created", new_slug,
             name=basket["name"],
             description=basket_theses.get("__description__", ""),
-            account_number="",
+            account_number=account,
             rebalance_threshold_pct=basket.get("threshold", 5.0),
         )]
 
@@ -384,23 +425,29 @@ def _build_basket_plans(baskets, assignments, orders, theses):
     return plans
 
 
-def build_events(baskets, assignments, orders, theses):
+def build_events(baskets, assignments, orders, theses, account):
     """Return the full ordered list of events for every basket.
 
-    Per basket, in order: one `basket_created`, one `holding_added` per
-    symbol carrying its NORMALIZED weight, then one `buy` per attributed
-    order in fill-time order.
+    Per basket, in order: one `basket_created` (carrying `account`), one
+    `holding_added` per symbol carrying its NORMALIZED weight, then one
+    `buy` per attributed order in fill-time order.
     """
     events = []
-    for plan in _build_basket_plans(baskets, assignments, orders, theses):
+    for plan in _build_basket_plans(baskets, assignments, orders, theses, account):
         events.extend(plan["events"])
     return events
 
 
 # --- migration -----------------------------------------------------------------
 
-def migrate(data_dir, watchlists, orders, legacy_dir, apply=False):
+def migrate(data_dir, watchlists, orders, legacy_dir, account, apply=False):
     """Read the sources, attribute orders, and write through the event log.
+
+    `account` is the brokerage account number every migrated basket's
+    `basket_created` event records. It is required: `record-fills`' account
+    guard (basket.py) only fires when a basket's `account_number` is
+    non-empty, so a basket migrated without one would silently accept fills
+    from any account.
 
     Never writes when `apply` is False. When `apply` is True, skips any
     basket whose (new) slug already exists in the log, and skips any `buy`
@@ -408,8 +455,8 @@ def migrate(data_dir, watchlists, orders, legacy_dir, apply=False):
     nothing.
 
     Returns a report: `dry_run`, `baskets` (each with `old_slug`,
-    `new_slug`, `symbols`, `orders`, `weights_changed`), `unattributed`,
-    and `warnings`.
+    `new_slug` — equal when the stored slug was kept unchanged — `symbols`,
+    `orders`, `weights_changed`), `unattributed`, and `warnings`.
     """
     data_dir = Path(data_dir)
     baskets = read_baskets(watchlists)
@@ -417,7 +464,7 @@ def migrate(data_dir, watchlists, orders, legacy_dir, apply=False):
     theses = read_legacy_theses(legacy_dir)
 
     assignments, unattributed = attribute_orders(baskets, orders_list)
-    plans = _build_basket_plans(baskets, assignments, orders_list, theses)
+    plans = _build_basket_plans(baskets, assignments, orders_list, theses, account)
 
     def plan_events(existing_slugs, existing_order_ids):
         """Return (basket_reports, new_events, warnings) against a given state.
@@ -520,6 +567,11 @@ def build_parser():
                         help="The get_equity_orders response, as JSON")
     parser.add_argument("--legacy-dir", default=None,
                         help="Directory of legacy data/baskets/*.json files")
+    parser.add_argument("--account", required=True,
+                        help="The brokerage account number every migrated "
+                             "basket will carry (required — an empty "
+                             "account_number disables record-fills' account "
+                             "guard)")
     parser.add_argument("--data-dir", default=None, help=argparse.SUPPRESS)
     parser.add_argument("--apply", action="store_true",
                         help="Write the migration. Without this, it is a dry run.")
@@ -581,7 +633,7 @@ def main(argv=None):
         watchlists = _load_json_arg(args.watchlists_json, "--watchlists-json")
         orders = _load_json_arg(args.orders_json, "--orders-json")
         report = migrate(data_dir, watchlists, orders, args.legacy_dir,
-                         apply=args.apply)
+                         args.account, apply=args.apply)
     except CliError as error:
         return _emit_error(error)
     except WeightError as error:
@@ -592,10 +644,11 @@ def main(argv=None):
         }) + "\n")
         return EXIT_IO
 
-    if report["dry_run"]:
+    if report["dry_run"] and args.format != "table":
         # Prominent and on stderr, so it survives even when stdout is piped
         # into a JSON parser, and nobody mistakes a preview for a completed
-        # migration.
+        # migration. Table format already prints its own banner to stdout
+        # (see print_table) — printing this one too would just repeat it.
         sys.stderr.write(
             "DRY RUN: no events were written. Re-run with --apply to write "
             "them.\n")

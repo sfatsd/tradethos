@@ -16,6 +16,7 @@ from migrate_v2 import (
     attribute_orders,
     normalize_basket_weights,
     read_baskets,
+    resolve_slug,
 )
 
 from basket_events import EventLog
@@ -74,6 +75,46 @@ class TestNormalizeBasketWeights(unittest.TestCase):
             self.assertEqual(value, int(value))
 
 
+class TestResolveSlug(unittest.TestCase):
+
+    def test_a_short_stored_slug_is_kept_even_though_it_differs(self):
+        # ai-20 -> "Test 20 Symbol Compressed Basket" regenerates to
+        # something completely different and much longer, but ai-20 is not
+        # 24 characters, so it is never a truncation candidate and is kept.
+        self.assertEqual(
+            resolve_slug("ai-20", "Test 20 Symbol Compressed Basket"),
+            "ai-20")
+
+    def test_a_genuinely_truncated_slug_is_regenerated(self):
+        # The old encoder spelled "&" out as "and"; slugify() drops it, so
+        # the stored 24-char slug no longer looks like a literal prefix of
+        # today's regenerated slug without reconstructing it the old way.
+        self.assertEqual(
+            resolve_slug("optical-and-photonics-in", "Optical & Photonics Index"),
+            "optical-photonics-index")
+
+    def test_a_24_char_slug_that_is_not_a_prefix_is_left_alone(self):
+        # Same length as a real truncation, but unrelated to the display
+        # name -- this must not be mistaken for a truncation.
+        synthetic_old_slug = "totally-unrelated-slug-0"
+        self.assertEqual(len(synthetic_old_slug), 24)
+        self.assertEqual(
+            resolve_slug(synthetic_old_slug, "Something Else Entirely"),
+            synthetic_old_slug)
+
+    def test_a_24_char_slug_that_was_never_truncated_is_kept(self):
+        # storage-and-memory-index IS 24 characters whole -- its full
+        # (un-truncated) form never exceeded the cap, so it must be kept
+        # even though it is also exactly 24 characters long.
+        self.assertEqual(
+            resolve_slug("storage-and-memory-index", "Storage & Memory Index"),
+            "storage-and-memory-index")
+
+    def test_a_missing_slug_is_regenerated(self):
+        self.assertEqual(resolve_slug("", "Brand New Basket"), "brand-new-basket")
+        self.assertEqual(resolve_slug(None, "Brand New Basket"), "brand-new-basket")
+
+
 class TestAttribution(unittest.TestCase):
 
     def setUp(self):
@@ -130,6 +171,8 @@ class TestAttribution(unittest.TestCase):
 
 class TestBuildAndMigrate(unittest.TestCase):
 
+    ACCOUNT = "5PA00000"
+
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
@@ -139,9 +182,11 @@ class TestBuildAndMigrate(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_migration(self, apply=True):
+    def run_migration(self, apply=True, account=None):
         from migrate_v2 import migrate
-        return migrate(self.dir, self.watchlists, self.orders, None, apply=apply)
+        return migrate(self.dir, self.watchlists, self.orders, None,
+                        account if account is not None else self.ACCOUNT,
+                        apply=apply)
 
     def state(self):
         return replay(EventLog(self.dir).read()).baskets
@@ -155,6 +200,11 @@ class TestBuildAndMigrate(unittest.TestCase):
     def test_apply_creates_every_basket(self):
         self.run_migration()
         self.assertEqual(len(self.state()), 6)
+
+    def test_the_migrated_baskets_carry_the_account(self):
+        self.run_migration()
+        for slug, basket in self.state().items():
+            self.assertEqual(basket.account_number, self.ACCOUNT, slug)
 
     def test_the_truncated_slug_is_regenerated(self):
         self.run_migration()
@@ -232,7 +282,8 @@ class TestMigrateCli(unittest.TestCase):
         cmd = [sys.executable, self.script,
                "--watchlists-json", self.watchlists_text,
                "--orders-json", self.orders_text,
-               "--data-dir", str(self.dir)]
+               "--data-dir", str(self.dir),
+               "--account", "5PA00000"]
         cmd.extend(extra_args)
         proc = subprocess.run(cmd, capture_output=True, text=True)
         return proc.returncode, proc.stdout, proc.stderr
@@ -267,6 +318,12 @@ class TestMigrateCli(unittest.TestCase):
         self.assertIn("NVDA", out)
         self.assertIn(self.UNATTRIBUTED_ID, out)
 
+    def test_table_format_prints_the_dry_run_banner_only_once(self):
+        code, out, err = self.run_cli("--format", "table")
+        self.assertEqual(code, 0)
+        self.assertEqual(out.count("DRY RUN"), 1)
+        self.assertNotIn("DRY RUN", err)
+
     def test_a_missing_required_argument_exits_one_with_a_json_error(self):
         proc = subprocess.run(
             [sys.executable, self.script, "--data-dir", str(self.dir)],
@@ -277,12 +334,23 @@ class TestMigrateCli(unittest.TestCase):
         self.assertIn("code", payload)
         self.assertIn("error", payload)
 
+    def test_omitting_account_exits_non_zero(self):
+        proc = subprocess.run(
+            [sys.executable, self.script,
+             "--watchlists-json", self.watchlists_text,
+             "--orders-json", self.orders_text,
+             "--data-dir", str(self.dir)],
+            capture_output=True, text=True)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertFalse((self.dir / "events.log.jsonl").exists())
+
     def test_invalid_json_exits_one_with_a_json_error(self):
         proc = subprocess.run(
             [sys.executable, self.script,
              "--watchlists-json", "not json",
              "--orders-json", self.orders_text,
-             "--data-dir", str(self.dir)],
+             "--data-dir", str(self.dir),
+             "--account", "5PA00000"],
             capture_output=True, text=True)
         self.assertEqual(proc.returncode, 1)
         payload = json.loads(proc.stderr)
