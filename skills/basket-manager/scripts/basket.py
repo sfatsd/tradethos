@@ -17,7 +17,7 @@ if str(SCRIPTS_DIR) not in sys.path:
 
 from basket_events import CorruptLineError, EventLog, make_event, utc_now
 from basket_store import replay, slugify, snapshot_dict
-from basket_weights import WeightError, normalize_weights
+from basket_weights import FILL_MODES, WeightError, normalize_weights, refill
 
 DEFAULT_DATA_DIR = Path.home() / ".tradethos"
 
@@ -133,6 +133,73 @@ def normalize_or_fail(weights):
         raise CliError(str(error), "BAD_WEIGHTS", {})
 
 
+def refill_or_fail(others, room, mode):
+    """Call refill and turn a WeightError into a CliError."""
+    try:
+        return refill(others, room, mode)
+    except WeightError as error:
+        raise CliError(str(error), "BAD_WEIGHTS", {})
+
+
+def check_target_weight(weight, symbol):
+    """Reject a target weight outside 1 to 100.
+
+    argparse accepts any integer, so 0 and negatives reach the command. A
+    weight of 0 means the user wants the holding gone, and remove-holding is
+    the command for that.
+    """
+    if weight < 1 or weight > 100:
+        raise CliError(
+            "A target weight must be between 1 and 100, but %s was given %d. "
+            "Use remove-holding to drop a holding." % (symbol, weight),
+            "BAD_WEIGHTS", {"symbol": symbol, "weight": weight})
+
+
+def plan_weight_change(basket, target_symbol, target_weight, fill_mode,
+                       removing=False):
+    """Return the complete weight set after a single-holding change.
+
+    The named holding takes its weight. Every other holding shares the rest,
+    by the fill mode. The result always sums to 100.
+
+    With removing=True the named holding leaves, and the remaining holdings
+    share the whole 100 percent.
+    """
+    others = dict((s, w) for s, w in basket.target_weights.items()
+                  if s != target_symbol)
+
+    if removing:
+        if not others:
+            return {}
+        return refill_or_fail(others, 100, fill_mode)
+
+    if not others:
+        return {target_symbol: 100}
+
+    room = 100 - int(target_weight)
+    if room < 1:
+        raise CliError(
+            "A weight of %d leaves nothing for the other holdings"
+            % int(target_weight), "BAD_WEIGHTS", {"symbol": target_symbol})
+
+    filled = refill_or_fail(others, room, fill_mode)
+    filled[target_symbol] = int(target_weight)
+    return filled
+
+
+def weight_events(basket, new_weights):
+    """Build a weight_changed event for each holding whose weight moved."""
+    events = []
+    for symbol, weight in new_weights.items():
+        holding = basket.holdings.get(symbol)
+        if holding is None or holding.target_weight_pct == weight:
+            continue
+        events.append(make_event(
+            "weight_changed", basket.slug, symbol=symbol,
+            **{"from": holding.target_weight_pct, "to": weight}))
+    return events
+
+
 def basket_view(basket, prices=None):
     """Build the JSON view that `show` prints."""
     prices = prices or {}
@@ -233,6 +300,159 @@ def cmd_export(args, store):
     return {"exported": store.export(slugs)}
 
 
+def _apply_weights(store, args, slug, basket, new_weights, extra_events=()):
+    """Write one batch of events, or return the dry-run view.
+
+    Every weight command appends exactly once. Two appends would leave a
+    window in which the log breaks the sum-to-100 invariant that section 6.5
+    promises can never happen.
+    """
+    events = list(extra_events) + weight_events(basket, new_weights)
+    if args.dry_run:
+        return {"dry_run": True, "slug": slug, "weights": new_weights,
+                "events": len(events)}
+    if events:
+        store.write(events, {slug})
+    return {"dry_run": False, "slug": slug, "weights": new_weights}
+
+
+def cmd_set_weight(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        symbol = args.symbol.upper()
+        if symbol not in basket.holdings:
+            raise CliError("The basket does not hold %s" % symbol,
+                           "SYMBOL_NOT_FOUND", {"symbol": symbol})
+        check_target_weight(args.weight, symbol)
+        new_weights = plan_weight_change(basket, symbol, args.weight, args.fill)
+        return _apply_weights(store, args, args.slug, basket, new_weights)
+
+
+def cmd_set_weights(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        given = parse_symbol_weights(args.weights)
+
+        missing = sorted(set(basket.holdings) - set(given))
+        if missing:
+            raise CliError(
+                "These holdings have no weight: %s" % ", ".join(missing),
+                "MISSING_WEIGHTS", {"missing": missing})
+        unknown = sorted(set(given) - set(basket.holdings))
+        if unknown:
+            raise CliError(
+                "The basket does not hold: %s" % ", ".join(unknown),
+                "SYMBOL_NOT_FOUND", {"unknown": unknown})
+
+        return _apply_weights(store, args, args.slug, basket,
+                              normalize_or_fail(given))
+
+
+def cmd_add_holding(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        symbol = args.symbol.upper()
+        if symbol in basket.holdings:
+            raise CliError("The basket already holds %s" % symbol,
+                           "SYMBOL_EXISTS", {"symbol": symbol})
+        if len(basket.holdings) + 1 > 100:
+            raise CliError("A basket holds at most 100 holdings",
+                           "TOO_MANY_HOLDINGS", {})
+        check_target_weight(args.weight, symbol)
+
+        new_weights = plan_weight_change(basket, symbol, args.weight, args.fill)
+        added = make_event("holding_added", args.slug, symbol=symbol,
+                           weight=int(args.weight), thesis=args.thesis or "")
+        # weight_events skips the new symbol, because the basket does not hold
+        # it yet. The holding_added event carries its weight instead.
+        return _apply_weights(store, args, args.slug, basket, new_weights,
+                              extra_events=[added])
+
+
+def cmd_remove_holding(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        symbol = args.symbol.upper()
+        holding = basket.holdings.get(symbol)
+        if holding is None:
+            raise CliError("The basket does not hold %s" % symbol,
+                           "SYMBOL_NOT_FOUND", {"symbol": symbol})
+        if holding.has_position and not args.force:
+            raise CliError(
+                "%s still holds %s shares. Sell them first, or pass --force."
+                % (symbol, holding.position.shares),
+                "HOLDING_HAS_POSITION",
+                {"symbol": symbol, "shares": holding.position.shares})
+
+        new_weights = plan_weight_change(basket, symbol, 0, args.fill,
+                                         removing=True)
+        removed = make_event("holding_removed", args.slug, symbol=symbol)
+        # new_weights omits the removed symbol, so weight_events never emits
+        # an event for it.
+        return _apply_weights(store, args, args.slug, basket, new_weights,
+                              extra_events=[removed])
+
+
+def cmd_set_name(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        event = make_event("basket_updated", args.slug, field="name",
+                           **{"from": basket.name, "to": args.name})
+        store.write([event], {args.slug})
+    return {"slug": args.slug, "name": args.name}
+
+
+def cmd_set_description(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        event = make_event("basket_updated", args.slug, field="description",
+                           **{"from": basket.description, "to": args.description})
+        store.write([event], {args.slug})
+    return {"slug": args.slug, "description": args.description}
+
+
+def cmd_set_threshold(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        event = make_event(
+            "basket_updated", args.slug, field="rebalance_threshold_pct",
+            **{"from": basket.rebalance_threshold_pct, "to": args.threshold})
+        store.write([event], {args.slug})
+    return {"slug": args.slug, "rebalance_threshold_pct": args.threshold}
+
+
+def cmd_set_thesis(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        symbol = args.symbol.upper()
+        if symbol not in basket.holdings:
+            raise CliError("The basket does not hold %s" % symbol,
+                           "SYMBOL_NOT_FOUND", {"symbol": symbol})
+        event = make_event("thesis_changed", args.slug, symbol=symbol,
+                           thesis=args.thesis)
+        store.write([event], {args.slug})
+    return {"slug": args.slug, "symbol": symbol, "thesis": args.thesis}
+
+
+def cmd_delete(args, store):
+    with store.log.locked():
+        _, basket = store.require(args.slug)
+        held = [h.symbol for h in basket.holdings.values() if h.has_position]
+        if held and not args.force:
+            raise CliError(
+                "The basket still holds %s. Deletion removes the record only; "
+                "it does not sell any stock. Pass --force to delete it."
+                % ", ".join(held),
+                "BASKET_HAS_POSITIONS",
+                {"symbols": held, "total_invested": basket.total_invested})
+        store.log.append([make_event("basket_deleted", args.slug)])
+
+    path = store.baskets_dir / (args.slug + ".json")
+    if path.exists():
+        path.unlink()
+    return {"deleted": args.slug}
+
+
 # --- output -----------------------------------------------------------------
 
 def print_table(command, payload):
@@ -301,6 +521,69 @@ def build_parser():
     p = add("export", "Write the snapshot files")
     p.add_argument("slug", nargs="?", default=None)
     p.set_defaults(func=cmd_export)
+
+    def add_dry_run(p):
+        p.add_argument("--dry-run", action="store_true")
+
+    def add_fill(p):
+        p.add_argument("--fill", choices=list(FILL_MODES), default=FILL_MODES[0])
+
+    p = add("set-weight", "Set one target weight")
+    p.add_argument("slug")
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--weight", type=int, required=True)
+    add_fill(p)
+    add_dry_run(p)
+    p.set_defaults(func=cmd_set_weight)
+
+    p = add("set-weights", "Set every target weight")
+    p.add_argument("slug")
+    p.add_argument("--weights", required=True)
+    add_dry_run(p)
+    p.set_defaults(func=cmd_set_weights)
+
+    p = add("add-holding", "Add a symbol")
+    p.add_argument("slug")
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--weight", type=int, required=True)
+    p.add_argument("--thesis", default="")
+    add_fill(p)
+    add_dry_run(p)
+    p.set_defaults(func=cmd_add_holding)
+
+    p = add("remove-holding", "Remove a symbol")
+    p.add_argument("slug")
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--force", action="store_true")
+    add_fill(p)
+    add_dry_run(p)
+    p.set_defaults(func=cmd_remove_holding)
+
+    p = add("set-thesis", "Change a thesis")
+    p.add_argument("slug")
+    p.add_argument("--symbol", required=True)
+    p.add_argument("--thesis", required=True)
+    p.set_defaults(func=cmd_set_thesis)
+
+    p = add("set-name", "Change the display name")
+    p.add_argument("slug")
+    p.add_argument("--name", required=True)
+    p.set_defaults(func=cmd_set_name)
+
+    p = add("set-description", "Change the description")
+    p.add_argument("slug")
+    p.add_argument("--description", required=True)
+    p.set_defaults(func=cmd_set_description)
+
+    p = add("set-threshold", "Change the rebalance threshold")
+    p.add_argument("slug")
+    p.add_argument("--threshold", type=float, required=True)
+    p.set_defaults(func=cmd_set_threshold)
+
+    p = add("delete", "Delete a basket")
+    p.add_argument("slug")
+    p.add_argument("--force", action="store_true")
+    p.set_defaults(func=cmd_delete)
 
     return parser
 

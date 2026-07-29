@@ -167,5 +167,127 @@ class TestSnapshotExport(CliTestCase):
         self.assertTrue((self.data_dir / "baskets" / (slug + ".json")).exists())
 
 
+class TestWeightCommands(CliTestCase):
+
+    def three_holding_basket(self):
+        code, out, err = self.run_cli(
+            "create", "Trio", "--symbols", "NVDA:50,MSFT:30,AAPL:20",
+            "--account", "000000000")
+        self.assertEqual(code, 0, err)
+        return out["slug"]
+
+    def weights(self, slug):
+        out = self.run_cli("show", slug)[1]
+        return dict((h["symbol"], h["target_weight_pct"]) for h in out["holdings"])
+
+    def test_set_weight_proportional_is_the_default(self):
+        slug = self.three_holding_basket()
+        code, out, err = self.run_cli("set-weight", slug, "--symbol", "NVDA",
+                                      "--weight", "20")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.weights(slug), {"NVDA": 20, "MSFT": 48, "AAPL": 32})
+
+    def test_set_weight_equal_fill(self):
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli("set-weight", slug, "--symbol", "NVDA",
+                                    "--weight", "20", "--fill", "equal")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.weights(slug), {"NVDA": 20, "MSFT": 40, "AAPL": 40})
+
+    def test_dry_run_writes_nothing(self):
+        slug = self.three_holding_basket()
+        before = self.run_cli("history", slug)[1]["events"]
+        code, out, err = self.run_cli("set-weight", slug, "--symbol", "NVDA",
+                                      "--weight", "20", "--dry-run")
+        self.assertEqual(code, 0, err)
+        self.assertTrue(out["dry_run"])
+        after = self.run_cli("history", slug)[1]["events"]
+        self.assertEqual(len(before), len(after))
+        self.assertEqual(self.weights(slug)["NVDA"], 50)
+
+    def test_dry_run_returns_the_complete_set(self):
+        slug = self.three_holding_basket()
+        out = self.run_cli("set-weight", slug, "--symbol", "NVDA",
+                           "--weight", "20", "--dry-run")[1]
+        self.assertEqual(out["weights"], {"NVDA": 20, "MSFT": 48, "AAPL": 32})
+
+    def test_set_weights_needs_every_holding(self):
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli("set-weights", slug, "--weights", "NVDA:50,MSFT:50")
+        self.assertEqual(code, 1)
+        self.assertIn("AAPL", err)
+
+    def test_set_weights_refuses_an_unknown_symbol(self):
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli(
+            "set-weights", slug, "--weights", "NVDA:40,MSFT:30,AAPL:20,TSLA:10")
+        self.assertEqual(code, 1)
+        self.assertIn("TSLA", err)
+
+    def test_set_weights_normalizes(self):
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli("set-weights", slug,
+                                    "--weights", "NVDA:1,MSFT:1,AAPL:1")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(sum(self.weights(slug).values()), 100)
+
+    def test_set_weights_writes_only_changed_holdings(self):
+        slug = self.three_holding_basket()
+        self.run_cli("set-weights", slug, "--weights", "NVDA:50,MSFT:30,AAPL:20")
+        events = self.run_cli("history", slug)[1]["events"]
+        changed = [e for e in events if e["type"] == "weight_changed"]
+        self.assertEqual(changed, [])
+
+    def test_add_holding_scales_the_others_down(self):
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli("add-holding", slug, "--symbol", "TSLA",
+                                    "--weight", "20")
+        self.assertEqual(code, 0, err)
+        weights = self.weights(slug)
+        self.assertEqual(weights["TSLA"], 20)
+        self.assertEqual(sum(weights.values()), 100)
+
+    def test_remove_holding_scales_the_others_up(self):
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli("remove-holding", slug, "--symbol", "AAPL")
+        self.assertEqual(code, 0, err)
+        weights = self.weights(slug)
+        self.assertNotIn("AAPL", weights)
+        self.assertEqual(sum(weights.values()), 100)
+
+    def test_every_command_leaves_the_total_at_one_hundred(self):
+        slug = self.three_holding_basket()
+        for args in (
+            ("set-weight", slug, "--symbol", "NVDA", "--weight", "70"),
+            ("add-holding", slug, "--symbol", "TSLA", "--weight", "10"),
+            ("set-weights", slug, "--weights", "NVDA:1,MSFT:1,AAPL:1,TSLA:1"),
+            ("remove-holding", slug, "--symbol", "TSLA"),
+        ):
+            code, _, err = self.run_cli(*args)
+            self.assertEqual(code, 0, err)
+            self.assertEqual(sum(self.weights(slug).values()), 100, args)
+
+    def test_a_result_that_would_fall_to_zero_is_refused(self):
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli("set-weight", slug, "--symbol", "NVDA",
+                                    "--weight", "99")
+        self.assertEqual(code, 1)
+        self.assertIn("1 percent cannot cover 2 holdings", err)
+
+    def test_set_name_does_not_change_the_slug(self):
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli("set-name", slug, "--name", "Renamed")
+        self.assertEqual(code, 0, err)
+        out = self.run_cli("show", slug)[1]
+        self.assertEqual(out["slug"], slug)
+        self.assertEqual(out["name"], "Renamed")
+
+    def test_remove_holding_proceeds_when_no_shares_are_held(self):
+        # The refusal path needs a recorded fill, so Task 6 covers it.
+        slug = self.three_holding_basket()
+        code, _, err = self.run_cli("remove-holding", slug, "--symbol", "NVDA")
+        self.assertEqual(code, 0, err)
+
+
 if __name__ == "__main__":
     unittest.main()
