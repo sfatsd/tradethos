@@ -12,6 +12,7 @@ used only to decide which basket an order belongs to. See
 docs/superpowers/plans/2026-07-29-local-basket-storage-stage2.md.
 """
 
+import argparse
 import json
 import sys
 from pathlib import Path
@@ -23,7 +24,13 @@ if str(SCRIPTS_DIR) not in sys.path:
 from basket_events import EPOCH, EventLog, make_event, parse_timestamp
 from basket_store import replay, slugify
 from basket_utils import decode_watchlist_metadata
-from basket_weights import normalize_weights
+from basket_weights import WeightError, normalize_weights
+
+DEFAULT_DATA_DIR = Path.home() / ".tradethos"
+
+EXIT_OK = 0
+EXIT_VALIDATION = 1
+EXIT_IO = 2
 
 # An order of magnitude above the largest observed drift between a snapshot
 # claim and the order that produced it (IPGP, 0.000106), and far below the
@@ -32,6 +39,17 @@ from basket_weights import normalize_weights
 SHARE_TOLERANCE = 0.0005
 
 BASKET_NAME_PREFIX = "Basket: "
+
+
+class CliError(Exception):
+    """An error the CLI reports as JSON on stderr."""
+
+    def __init__(self, message, code, detail=None, exit_code=EXIT_VALIDATION):
+        super(CliError, self).__init__(message)
+        self.message = message
+        self.code = code
+        self.detail = detail or {}
+        self.exit_code = exit_code
 
 
 # --- reading the sources -----------------------------------------------------
@@ -474,3 +492,120 @@ def migrate(data_dir, watchlists, orders, legacy_dir, apply=False):
         ],
         "warnings": warnings,
     }
+
+
+# --- command line ------------------------------------------------------------
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """Report a parse failure as a CliError instead of exiting straight away.
+
+    The base class's `error()` prints usage text and calls `sys.exit(2)`
+    directly, which would bypass the JSON error envelope every other failure
+    in this tool produces. Raising instead lets `main()` catch it alongside
+    every other CliError and report it the same way, with the same exit
+    code (1) that every other validation failure uses.
+    """
+
+    def error(self, message):
+        raise CliError(message, "BAD_ARGS", {}, exit_code=EXIT_VALIDATION)
+
+
+def build_parser():
+    parser = _ArgumentParser(
+        prog="migrate_v2.py",
+        description="Move the user's live cloud baskets into the local event store")
+    parser.add_argument("--watchlists-json", required=True,
+                        help="The get_watchlists response, as JSON")
+    parser.add_argument("--orders-json", required=True,
+                        help="The get_equity_orders response, as JSON")
+    parser.add_argument("--legacy-dir", default=None,
+                        help="Directory of legacy data/baskets/*.json files")
+    parser.add_argument("--data-dir", default=None, help=argparse.SUPPRESS)
+    parser.add_argument("--apply", action="store_true",
+                        help="Write the migration. Without this, it is a dry run.")
+    parser.add_argument("--format", choices=["json", "table"], default="json")
+    return parser
+
+
+def _load_json_arg(text, flag):
+    try:
+        return json.loads(text)
+    except ValueError as error:
+        raise CliError("The %s value is not valid JSON: %s" % (flag, error),
+                       "BAD_JSON", {"flag": flag})
+
+
+def print_table(report):
+    """Print a human-readable summary of a migration report."""
+    print("DRY RUN — no events were written. Pass --apply to write them."
+          if report["dry_run"] else "APPLIED — events were written.")
+    print()
+    print("%-28s %-32s %8s %8s %s" % (
+        "Old slug", "New slug", "Symbols", "Orders", "Weights changed"))
+    print("-" * 90)
+    for row in report["baskets"]:
+        note = " (already migrated)" if row.get("already_migrated") else ""
+        print("%-28s %-32s %8d %8d %s%s" % (
+            row["old_slug"], row["new_slug"], len(row["symbols"]),
+            len(row["orders"]), row["weights_changed"], note))
+
+    if report["unattributed"]:
+        print()
+        print("Unattributed orders (no basket claimed them):")
+        for order in report["unattributed"]:
+            print("  %s  %s  %s shares  %s" % (
+                order["order_id"], order["symbol"], order["shares"],
+                order.get("fill_time") or ""))
+
+    for warning in report.get("warnings", []):
+        print("WARNING: %s" % warning)
+
+
+def _emit_error(error):
+    sys.stderr.write(json.dumps({
+        "error": error.message, "code": error.code, "detail": error.detail,
+    }) + "\n")
+    return error.exit_code
+
+
+def main(argv=None):
+    parser = build_parser()
+    try:
+        args = parser.parse_args(argv)
+    except CliError as error:
+        return _emit_error(error)
+
+    data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
+
+    try:
+        watchlists = _load_json_arg(args.watchlists_json, "--watchlists-json")
+        orders = _load_json_arg(args.orders_json, "--orders-json")
+        report = migrate(data_dir, watchlists, orders, args.legacy_dir,
+                         apply=args.apply)
+    except CliError as error:
+        return _emit_error(error)
+    except WeightError as error:
+        return _emit_error(CliError(str(error), "BAD_WEIGHTS", {}))
+    except OSError as error:
+        sys.stderr.write(json.dumps({
+            "error": str(error), "code": "IO_ERROR", "detail": {},
+        }) + "\n")
+        return EXIT_IO
+
+    if report["dry_run"]:
+        # Prominent and on stderr, so it survives even when stdout is piped
+        # into a JSON parser, and nobody mistakes a preview for a completed
+        # migration.
+        sys.stderr.write(
+            "DRY RUN: no events were written. Re-run with --apply to write "
+            "them.\n")
+
+    if args.format == "table":
+        print_table(report)
+    else:
+        print(json.dumps(report, indent=2))
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    sys.exit(main())

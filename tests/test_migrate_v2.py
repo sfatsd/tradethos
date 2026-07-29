@@ -2,6 +2,7 @@
 """Tests for the Stage 2 migration."""
 
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -210,6 +211,82 @@ class TestBuildAndMigrate(unittest.TestCase):
             self.assertIn("v", event)
             self.assertIn("type", event)
             self.assertIn("slug", event)
+
+
+class TestMigrateCli(unittest.TestCase):
+    """Drives migrate_v2.py as a subprocess, the way the controller will."""
+
+    UNATTRIBUTED_ID = "REDACTEDC5-0000-0000-0000-000000000023"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.script = str(ROOT / "skills" / "basket-manager" / "scripts" / "migrate_v2.py")
+        self.watchlists_text = (FIXTURES / "live_watchlists.json").read_text()
+        self.orders_text = (FIXTURES / "live_orders.json").read_text()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_cli(self, *extra_args):
+        cmd = [sys.executable, self.script,
+               "--watchlists-json", self.watchlists_text,
+               "--orders-json", self.orders_text,
+               "--data-dir", str(self.dir)]
+        cmd.extend(extra_args)
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        return proc.returncode, proc.stdout, proc.stderr
+
+    def test_dry_run_is_the_default(self):
+        code, out, err = self.run_cli()
+        self.assertEqual(code, 0)
+        self.assertFalse((self.dir / "events.log.jsonl").exists())
+        payload = json.loads(out)
+        self.assertTrue(payload["dry_run"])
+        self.assertEqual(len(payload["baskets"]), 6)
+
+    def test_apply_writes(self):
+        code, out, err = self.run_cli("--apply")
+        self.assertEqual(code, 0)
+        self.assertTrue((self.dir / "events.log.jsonl").exists())
+        payload = json.loads(out)
+        self.assertFalse(payload["dry_run"])
+        self.assertEqual(len(replay(EventLog(self.dir).read()).baskets), 6)
+
+    def test_a_second_apply_is_a_no_op(self):
+        self.run_cli("--apply")
+        before = EventLog(self.dir).count()
+        code, out, err = self.run_cli("--apply")
+        self.assertEqual(code, 0)
+        self.assertEqual(EventLog(self.dir).count(), before)
+
+    def test_table_format_names_the_unattributed_order(self):
+        code, out, err = self.run_cli("--format", "table")
+        self.assertEqual(code, 0)
+        self.assertIn("DRY RUN", out)
+        self.assertIn("NVDA", out)
+        self.assertIn(self.UNATTRIBUTED_ID, out)
+
+    def test_a_missing_required_argument_exits_one_with_a_json_error(self):
+        proc = subprocess.run(
+            [sys.executable, self.script, "--data-dir", str(self.dir)],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        self.assertFalse((self.dir / "events.log.jsonl").exists())
+        payload = json.loads(proc.stderr)
+        self.assertIn("code", payload)
+        self.assertIn("error", payload)
+
+    def test_invalid_json_exits_one_with_a_json_error(self):
+        proc = subprocess.run(
+            [sys.executable, self.script,
+             "--watchlists-json", "not json",
+             "--orders-json", self.orders_text,
+             "--data-dir", str(self.dir)],
+            capture_output=True, text=True)
+        self.assertEqual(proc.returncode, 1)
+        payload = json.loads(proc.stderr)
+        self.assertIn("code", payload)
 
 
 if __name__ == "__main__":
