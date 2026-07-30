@@ -88,6 +88,31 @@ def normalize_weights(weights):
     return result
 
 
+def allocate_cents(weights, total_cents):
+    """Split `total_cents` across `weights` so the parts sum to it exactly.
+
+    Rounding each row on its own loses or gains cents: 10 cents across
+    weights of 33/33/34 rounds to 3+3+3 and allocates 9. The whole-cent
+    shares therefore go through the same largest-remainder pass the target
+    weights themselves use, which puts every leftover cent on the largest
+    fractional part and breaks a tie by symbol.
+
+    `weights` maps symbol -> whole percent, summing to 100. Returns
+    {symbol: whole cents}, summing to exactly `total_cents`.
+    """
+    if not weights:
+        return {}
+
+    total = float(sum(weights.values()))
+    if total <= 0:
+        return dict((symbol, 0) for symbol in weights)
+
+    exact = {}
+    for symbol, weight in weights.items():
+        exact[symbol] = total_cents * weight / total
+    return _largest_remainder(exact, total_cents)
+
+
 def refill(others, room, mode=FILL_PROPORTIONAL):
     """Distribute `room` percent across `others`.
 

@@ -98,7 +98,8 @@ $BASKET create "Storage Leaders" \
 ```
 
 - `--symbols` is `SYMBOL:WEIGHT,SYMBOL:WEIGHT,...`. A weight is a ratio or a percent; the tool
-  normalizes it to whole numbers that sum to 100.
+  normalizes it to whole numbers that sum to 100. Naming the same symbol twice is refused
+  (`DUPLICATE_SYMBOL`) rather than resolved — ask the user which weight they meant.
 - `--account` is required. It is the brokerage account that will hold this basket's trades.
   `record-fills` later refuses an order from any other account.
 - `--description` and `--threshold` are optional. `--threshold` is the rebalance drift alert
@@ -155,6 +156,10 @@ Rebuilds the snapshot file for one basket, or for every basket with no slug. No 
 these files back; they exist so the user has a readable copy to open or copy. Run this after
 deleting or damaging the `baskets/` directory to restore it — nothing is lost, because the log
 holds every fact.
+
+With no slug, `export` also **deletes any snapshot whose basket the log no longer holds**, so a
+deleted basket does not leave a stale file behind. Naming a slug never deletes anything. If the
+log has a corrupt line, no file is deleted either — run `verify` first.
 
 ### Changing target weights
 
@@ -239,7 +244,9 @@ $BASKET plan-buy storage-leaders --amount 500 --prices '{"WDC":50.00,"STX":92.00
 ```
 
 Divides the dollar amount across the target weights and returns a dollar allocation per
-symbol. With `--prices`, it also returns an estimated share count per symbol. `plan-buy`
+symbol. The allocations are whole cents that **sum to the requested amount exactly** — the
+leftover cents go to the largest fractional shares, so the plan never comes up a cent short.
+With `--prices`, it also returns an estimated share count per symbol. `plan-buy`
 writes nothing — it is a calculator, not a gate. The agent uses its output to place real
 orders (see "Recording Trades" below), never to compute the split by hand.
 

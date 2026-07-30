@@ -72,6 +72,16 @@ class TestEventLog(unittest.TestCase):
         ])
         self.assertEqual(self.log.count(), 2)
 
+    def test_count_agrees_with_read_when_a_line_is_torn(self):
+        # count() goes through the same locked, corruption-aware read as
+        # everything else, so a torn line is not counted as an event and the
+        # count can never disagree with what a replay finds.
+        self.log.append([make_event("basket_created", "a", name="A")])
+        with self.log.path.open("a") as handle:
+            handle.write('{"type": "holding_add')
+        self.assertEqual(self.log.count(), 1)
+        self.assertEqual(self.log.count(), len(self.log.read()))
+
     def test_each_line_is_valid_json_on_its_own(self):
         self.log.append([make_event("basket_created", "a", name="A")])
         raw = self.log.path.read_text().splitlines()

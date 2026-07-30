@@ -99,6 +99,31 @@ class TestCreate(CliTestCase):
         self.assertEqual(code, 0)
         self.assertEqual(out["holdings"][0]["symbol"], "NVDA")
 
+    def test_a_symbol_listed_twice_is_refused(self):
+        # Silently keeping the last weight is a coin flip on which number the
+        # user meant, so the tool refuses and names the symbol.
+        code, _, err = self.run_cli("create", "Dup", "--symbols",
+                                    "NVDA:10,NVDA:20", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("DUPLICATE_SYMBOL", err)
+        self.assertIn("NVDA", err)
+        self.assertIn("10", err)
+        self.assertIn("20", err)
+
+    def test_a_symbol_listed_twice_in_different_cases_is_refused(self):
+        # The symbols are upper-cased before the duplicate check, so these
+        # are the same symbol.
+        code, _, err = self.run_cli("create", "Dup", "--symbols",
+                                    "nvda:10,NVDA:20", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("DUPLICATE_SYMBOL", err)
+
+    def test_a_duplicate_symbol_writes_nothing(self):
+        self.run_cli("create", "Dup", "--symbols", "NVDA:10,NVDA:20",
+                     "--account", "123456789")
+        code, out, _ = self.run_cli("list")
+        self.assertEqual(out["baskets"], [])
+
 
 class TestList(CliTestCase):
 
@@ -170,6 +195,53 @@ class TestSnapshotExport(CliTestCase):
         code, _, err = self.run_cli("export")
         self.assertEqual(code, 0, err)
         self.assertTrue((self.data_dir / "baskets" / (slug + ".json")).exists())
+
+    def test_exporting_everything_removes_a_stale_snapshot(self):
+        # A deleted basket's snapshot used to sit in the directory forever,
+        # describing a basket the log no longer produces.
+        keep = self.make_basket(name="Keeper", symbols="NVDA:1,MSFT:1")
+        goner = self.make_basket(name="Goner", symbols="AMD:1,INTC:1")
+        goner_path = self.data_dir / "baskets" / (goner + ".json")
+        self.assertTrue(goner_path.exists())
+
+        code, _, err = self.run_cli("delete", goner)
+        self.assertEqual(code, 0, err)
+
+        code, out, err = self.run_cli("export")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["exported"], [keep])
+        self.assertFalse(goner_path.exists())
+        self.assertTrue((self.data_dir / "baskets" / (keep + ".json")).exists())
+
+    def test_exporting_everything_removes_an_unrelated_orphan_file(self):
+        keep = self.make_basket(name="Keeper", symbols="NVDA:1,MSFT:1")
+        orphan = self.data_dir / "baskets" / "never-existed.json"
+        orphan.write_text('{"slug": "never-existed"}\n')
+
+        code, _, err = self.run_cli("export")
+        self.assertEqual(code, 0, err)
+        self.assertFalse(orphan.exists())
+        self.assertTrue((self.data_dir / "baskets" / (keep + ".json")).exists())
+
+    def test_exporting_one_slug_deletes_nothing(self):
+        keep = self.make_basket(name="Keeper", symbols="NVDA:1,MSFT:1")
+        orphan = self.data_dir / "baskets" / "never-existed.json"
+        orphan.write_text('{"slug": "never-existed"}\n')
+
+        code, out, err = self.run_cli("export", keep)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["exported"], [keep])
+        # A single-slug export has not been asked about the rest of the
+        # directory, and `Store.write` uses that form after every command.
+        self.assertTrue(orphan.exists())
+
+    def test_a_normal_write_leaves_another_baskets_snapshot_alone(self):
+        first = self.make_basket(name="First", symbols="NVDA:1,MSFT:1")
+        second = self.make_basket(name="Second", symbols="AMD:1,INTC:1")
+        code, _, err = self.run_cli("set-weight", first, "--symbol", "NVDA",
+                                    "--weight", "70")
+        self.assertEqual(code, 0, err)
+        self.assertTrue((self.data_dir / "baskets" / (second + ".json")).exists())
 
 
 class TestWeightCommands(CliTestCase):
@@ -1015,6 +1087,36 @@ class TestPlanning(CliTestCase):
         amounts = dict((r["symbol"], r["amount"]) for r in out["orders"])
         self.assertEqual(amounts, {"NVDA": 60.0, "MSFT": 40.0})
         self.assertEqual(round(sum(amounts.values()), 2), 100.0)
+
+    def test_plan_buy_allocates_every_cent_of_an_awkward_amount(self):
+        # 33/33/34 over 10 cents: rounding each row on its own gives three
+        # cents apiece and allocates 9. The largest-remainder pass must put
+        # the tenth cent on the 34 percent holding.
+        slug = self.make_basket(name="Thirds",
+                                symbols="AAA:33,BBB:33,CCC:34")
+        code, out, err = self.run_cli("plan-buy", slug, "--amount", "0.10")
+        self.assertEqual(code, 0, err)
+        amounts = dict((r["symbol"], r["amount"]) for r in out["orders"])
+        self.assertEqual(amounts, {"AAA": 0.03, "BBB": 0.03, "CCC": 0.04})
+        self.assertEqual(sum(amounts.values()), 0.10)
+
+    def test_plan_buy_allocates_every_cent_across_seven_holdings(self):
+        # Seven holdings at 15/15/14/14/14/14/14 over $10.01.
+        slug = self.make_basket(
+            name="Seven",
+            symbols="AAA:1,BBB:1,CCC:1,DDD:1,EEE:1,FFF:1,GGG:1")
+        code, out, err = self.run_cli("plan-buy", slug, "--amount", "10.01")
+        self.assertEqual(code, 0, err)
+        cents = sum(int(round(r["amount"] * 100)) for r in out["orders"])
+        self.assertEqual(cents, 1001)
+
+    def test_plan_buy_never_drifts_across_a_range_of_amounts(self):
+        slug = self.make_basket(name="Trio", symbols="AAA:33,BBB:33,CCC:34")
+        for amount in ("0.01", "0.07", "0.10", "1.00", "3.33", "99.99", "100"):
+            code, out, err = self.run_cli("plan-buy", slug, "--amount", amount)
+            self.assertEqual(code, 0, err)
+            cents = sum(int(round(r["amount"] * 100)) for r in out["orders"])
+            self.assertEqual(cents, int(round(float(amount) * 100)), amount)
 
     def test_plan_buy_returns_shares_with_prices(self):
         code, out, err = self.run_cli("plan-buy", self.slug, "--amount", "100",

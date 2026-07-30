@@ -218,15 +218,14 @@ class EventLog(object):
         return self.read_with_corruption()[0]
 
     def count(self):
-        """Return the number of events in the log."""
-        if not self.path.exists():
-            return 0
-        total = 0
-        with self.path.open("r") as handle:
-            for raw in handle:
-                if raw.strip():
-                    total += 1
-        return total
+        """Return the number of readable events in the log.
+
+        Counted through the same locked, corruption-aware read the rest of
+        the tool uses. Counting the raw lines under no lock could see a
+        half-written last line mid-append and count a torn line as an event,
+        which then disagrees with what a replay finds.
+        """
+        return len(self.read())
 
     def append(self, events):
         """Append events to the log and make them durable.

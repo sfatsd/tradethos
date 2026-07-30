@@ -23,7 +23,8 @@ import basket_events
 from basket_events import (EPOCH, EventLog, corrupt_line_warnings, make_event,
                            parse_timestamp, utc_now)
 from basket_store import replay, slugify, snapshot_dict
-from basket_weights import FILL_MODES, WeightError, normalize_weights, refill
+from basket_weights import (FILL_MODES, WeightError, allocate_cents,
+                            normalize_weights, refill)
 
 DEFAULT_DATA_DIR = Path.home() / ".tradethos"
 
@@ -86,6 +87,16 @@ class Store(object):
     def export(self, slugs=None):
         """Write the snapshot file for the named baskets, or for all of them.
 
+        Exporting every basket also removes any snapshot whose basket the
+        replay no longer produces — a deleted basket used to leave its file
+        behind forever, and a snapshot for a basket that does not exist is
+        worse than no snapshot at all.
+
+        A single-slug export deletes nothing. It has only ever loaded one
+        basket's worth of intent, and the caller has not asked about the rest
+        of the directory; `Store.write` uses that narrow form after every
+        command, so a sweep there would delete on every write.
+
         Returns (written, corrupt): the slugs written, and any log lines the
         replay had to skip, so a caller can report them.
         """
@@ -98,11 +109,26 @@ class Store(object):
             path = self.baskets_dir / (slug + ".json")
             path.write_text(json.dumps(snapshot_dict(basket), indent=2) + "\n")
             written.append(slug)
+
+        # A corrupt log is not a reliable list of what exists: a basket whose
+        # `basket_created` line was the torn one is missing from the replay
+        # but not actually gone. Leave the directory alone and let `verify`
+        # report the corruption first.
+        if slugs is None and not result.corrupt:
+            live = set(result.baskets)
+            for path in sorted(self.baskets_dir.glob("*.json")):
+                if path.stem not in live:
+                    path.unlink()
         return written, result.corrupt
 
 
 def parse_symbol_weights(text):
-    """Parse 'NVDA:2,MSFT:1' into {'NVDA': 2.0, 'MSFT': 1.0}."""
+    """Parse 'NVDA:2,MSFT:1' into {'NVDA': 2.0, 'MSFT': 1.0}.
+
+    A symbol named twice is refused rather than resolved. 'NVDA:10,NVDA:20'
+    used to keep 20 silently, which is a coin flip on which number the user
+    meant.
+    """
     weights = {}
     for chunk in text.split(","):
         chunk = chunk.strip()
@@ -120,6 +146,11 @@ def parse_symbol_weights(text):
             raise CliError(
                 "The weight for %s is not a number: %r" % (symbol, raw),
                 "BAD_WEIGHT", {"symbol": symbol, "value": raw})
+        if symbol in weights:
+            raise CliError(
+                "%s is listed twice, with weights %s and %s. Give it one "
+                "weight." % (symbol, weights[symbol], value),
+                "DUPLICATE_SYMBOL", {"symbol": symbol})
         weights[symbol] = value
     if not weights:
         raise CliError("No symbols given", "BAD_SYMBOL_LIST", {})
@@ -539,9 +570,17 @@ def cmd_plan_buy(args, store):
     _require_holdings(basket)
     prices = parse_prices(args.prices)
 
+    # Allocated in whole cents, so the rows sum to the requested amount
+    # exactly. Rounding each row on its own drifts: $0.10 across weights of
+    # 33/33/34 rounds to three cents apiece and allocates $0.09.
+    weights = dict((symbol, holding.target_weight_pct)
+                   for symbol, holding in basket.holdings.items())
+    total_cents = int(round(args.amount * 100))
+    cents = allocate_cents(weights, total_cents)
+
     orders = []
     for symbol, holding in basket.holdings.items():
-        amount = args.amount * holding.target_weight_pct / 100.0
+        amount = cents[symbol] / 100.0
         row = {"symbol": symbol,
                "target_weight_pct": holding.target_weight_pct,
                "amount": round(amount, 2), "shares": None}
@@ -954,13 +993,17 @@ def run_backup(store, to=None):
         return None
     backups = Path(to) if to else store.data_dir / BACKUP_DIR_NAME
     backups.mkdir(parents=True, exist_ok=True)
+    # The copy and the marker are one unit of work: the marker records the
+    # event count the copy captured, so writing it after releasing the lock
+    # let a concurrent append land in between and leave the marker describing
+    # a log state that no backup file holds.
     with store.log.locked():
         count = store.log.count()
         stamp = utc_now().replace(":", "").replace("-", "").replace(".", "")
         target = backups / ("events-%s.jsonl" % stamp)
         shutil.copyfile(str(store.log.path), str(target))
-    (store.data_dir / MARKER_NAME).write_text(json.dumps({
-        "events": count, "at": utc_now(), "path": str(target)}) + "\n")
+        (store.data_dir / MARKER_NAME).write_text(json.dumps({
+            "events": count, "at": utc_now(), "path": str(target)}) + "\n")
     return target
 
 
