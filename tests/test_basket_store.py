@@ -168,12 +168,15 @@ class TestReplayMoney(unittest.TestCase):
         self.assertEqual(position.realized_pnl, 200.0)
 
     def test_the_replay_uses_shares_times_price_and_ignores_amount(self):
-        # A dollar order requests 10.00 and fills 0.048067 at 208.04, which is
-        # 10.0006. Exactly one field can be authoritative.
+        # A dollar order requests a round amount, then fills at whatever price
+        # the market gave. Here it requests 10.00 and fills 0.04 at 250.50,
+        # which is 10.02. Exactly one field can be authoritative, so the replay
+        # takes shares times price and ignores the requested amount.
         result = replay([created(), holding(),
-                         buy(shares=0.048067, price=208.04, amount=10.00)])
+                         buy(shares=0.04, price=250.50, amount=10.00)])
         position = result.baskets["mag7"].holdings["NVDA"].position
-        self.assertAlmostEqual(position.total_invested, 0.048067 * 208.04, places=6)
+        self.assertAlmostEqual(position.total_invested, 0.04 * 250.50, places=6)
+        self.assertNotAlmostEqual(position.total_invested, 10.00, places=2)
 
     def test_basket_totals_sum_the_holdings(self):
         events = [created(), holding(symbol="NVDA"), holding(symbol="MSFT"),

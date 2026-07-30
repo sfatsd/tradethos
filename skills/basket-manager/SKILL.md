@@ -275,7 +275,7 @@ price.
 ```bash
 $BASKET record-fills storage-leaders \
   --orders-json '<the get_equity_orders response>' \
-  --order-ids REDACTEDA1-0000-0000-0000-000000000001 \
+  --order-ids 1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d \
   --account 123456789
 ```
 
