@@ -92,7 +92,7 @@ including `history`, fall back to JSON when they have no table view of their own
 ```bash
 $BASKET create "Storage Leaders" \
   --symbols WDC:50,STX:50 \
-  --account 000000000 \
+  --account 123456789 \
   --description "Enterprise storage and memory" \
   --threshold 5.0
 ```
@@ -269,7 +269,7 @@ price.
 $BASKET record-fills storage-leaders \
   --orders-json '<the get_equity_orders response>' \
   --order-ids REDACTEDA1-0000-0000-0000-000000000001 \
-  --account 000000000
+  --account 123456789
 ```
 
 - `--orders-json` is the raw `get_equity_orders` response, unmodified.

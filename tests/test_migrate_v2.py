@@ -28,6 +28,12 @@ from basket_store import replay
 
 FIXTURES = ROOT / "tests" / "fixtures"
 
+# The fixtures are synthetic. tests/fixtures/generate_sample_fixtures.py
+# builds them, documents every structural property they carry, and is the
+# only way they should be changed.
+WATCHLISTS = "sample_watchlists.json"
+ORDERS = "sample_orders.json"
+
 
 def load(name):
     return json.loads((FIXTURES / name).read_text())
@@ -36,27 +42,42 @@ def load(name):
 class TestReadBaskets(unittest.TestCase):
 
     def setUp(self):
-        self.baskets = read_baskets(load("live_watchlists.json"))
+        self.baskets = read_baskets(load(WATCHLISTS))
         self.by_slug = dict((b["slug"], b) for b in self.baskets)
 
     def test_finds_every_basket_and_skips_ordinary_lists(self):
+        # Nine watchlists; the three that are ordinary lists must not decode.
+        self.assertEqual(len(load(WATCHLISTS)["data"]["watchlists"]), 9)
         self.assertEqual(len(self.baskets), 6)
-        self.assertNotIn("my-first-list", self.by_slug)
+        self.assertNotIn("long-term-watch", self.by_slug)
+        self.assertNotIn("crypto-watch", self.by_slug)
 
     def test_reads_weights_and_snapshots(self):
-        mag7 = self.by_slug["magnificent-7-index"]
-        self.assertEqual(len(mag7["weights"]), 7)
-        self.assertEqual(len(mag7["snapshot"]), 7)
+        core = self.by_slug["core-growth-index"]
+        self.assertEqual(len(core["weights"]), 7)
+        self.assertEqual(len(core["snapshot"]), 7)
 
     def test_a_basket_without_a_snapshot_reads_as_definition_only(self):
-        semi = self.by_slug["semiconductor-etf-style"]
-        self.assertEqual(len(semi["weights"]), 10)
-        self.assertEqual(semi["snapshot"], {})
+        semis = self.by_slug["broad-semis-basket"]
+        self.assertEqual(len(semis["weights"]), 10)
+        self.assertEqual(semis["snapshot"], {})
 
     def test_a_basket_with_no_watchlist_items_still_reads(self):
-        # test-250 and ai-20 have item_count 0 but carry full metadata.
-        self.assertIn("test-250", self.by_slug)
-        self.assertEqual(len(self.by_slug["test-250"]["weights"]), 12)
+        # sum-120-test and grid-20 have item_count 0 but carry full metadata,
+        # so a basket must be read from its description, never from its size.
+        zero_item_names = set(
+            w["display_name"] for w in load(WATCHLISTS)["data"]["watchlists"]
+            if w["item_count"] == 0 and w.get("display_description"))
+        self.assertEqual(zero_item_names,
+                         {"Basket: Sum 120 Test Basket",
+                          "Basket: Twenty Symbol Compressed Basket"})
+        self.assertEqual(len(self.by_slug["sum-120-test"]["weights"]), 12)
+        self.assertEqual(len(self.by_slug["grid-20"]["weights"]), 20)
+
+    def test_the_one_hundred_and_twenty_basket_sums_to_one_hundred_and_twenty(self):
+        # This is what keeps normalization exercised end to end.
+        weights = self.by_slug["sum-120-test"]["weights"]
+        self.assertEqual(sum(weights.values()), 120.0)
 
 
 class TestNormalizeBasketWeights(unittest.TestCase):
@@ -82,20 +103,23 @@ class TestNormalizeBasketWeights(unittest.TestCase):
 class TestResolveSlug(unittest.TestCase):
 
     def test_a_short_stored_slug_is_kept_even_though_it_differs(self):
-        # ai-20 -> "Test 20 Symbol Compressed Basket" regenerates to
-        # something completely different and much longer, but ai-20 is not
+        # grid-20 -> "Twenty Symbol Compressed Basket" regenerates to
+        # something completely different and much longer, but grid-20 is not
         # 24 characters, so it is never a truncation candidate and is kept.
         self.assertEqual(
-            resolve_slug("ai-20", "Test 20 Symbol Compressed Basket"),
-            "ai-20")
+            resolve_slug("grid-20", "Twenty Symbol Compressed Basket"),
+            "grid-20")
 
     def test_a_genuinely_truncated_slug_is_regenerated(self):
         # The old encoder spelled "&" out as "and"; slugify() drops it, so
         # the stored 24-char slug no longer looks like a literal prefix of
         # today's regenerated slug without reconstructing it the old way.
+        # "photonics-and-lasers-index" is 26 characters, so cutting it to 24
+        # really did lose something.
+        self.assertEqual(len("photonics-and-lasers-ind"), 24)
         self.assertEqual(
-            resolve_slug("optical-and-photonics-in", "Optical & Photonics Index"),
-            "optical-photonics-index")
+            resolve_slug("photonics-and-lasers-ind", "Photonics & Lasers Index"),
+            "photonics-lasers-index")
 
     def test_a_24_char_slug_that_is_not_a_prefix_is_left_alone(self):
         # Same length as a real truncation, but unrelated to the display
@@ -107,12 +131,13 @@ class TestResolveSlug(unittest.TestCase):
             synthetic_old_slug)
 
     def test_a_24_char_slug_that_was_never_truncated_is_kept(self):
-        # storage-and-memory-index IS 24 characters whole -- its full
+        # optics-and-storage-index IS 24 characters whole -- its full
         # (un-truncated) form never exceeded the cap, so it must be kept
         # even though it is also exactly 24 characters long.
+        self.assertEqual(len("optics-and-storage-index"), 24)
         self.assertEqual(
-            resolve_slug("storage-and-memory-index", "Storage & Memory Index"),
-            "storage-and-memory-index")
+            resolve_slug("optics-and-storage-index", "Optics & Storage Index"),
+            "optics-and-storage-index")
 
     def test_a_missing_slug_is_regenerated(self):
         self.assertEqual(resolve_slug("", "Brand New Basket"), "brand-new-basket")
@@ -122,8 +147,8 @@ class TestResolveSlug(unittest.TestCase):
 class TestAttribution(unittest.TestCase):
 
     def setUp(self):
-        self.baskets = read_baskets(load("live_watchlists.json"))
-        self.orders = load("live_orders.json")["data"]["orders"]
+        self.baskets = read_baskets(load(WATCHLISTS))
+        self.orders = load(ORDERS)["data"]["orders"]
         self.assignments, self.unattributed = attribute_orders(self.baskets, self.orders)
 
     def slug_for(self, symbol, shares):
@@ -132,22 +157,26 @@ class TestAttribution(unittest.TestCase):
                 return self.assignments.get(order["id"])
         self.fail("no order for %s %s" % (symbol, shares))
 
-    def test_lite_orders_split_across_two_baskets(self):
-        # 0.029940 matches Optical's 0.02996; 0.011975 matches Storage's 0.01198.
-        self.assertEqual(self.slug_for("LITE", 0.029940), "optical-and-photonics-in")
-        self.assertEqual(self.slug_for("LITE", 0.011975), "storage-and-memory-index")
+    def test_lser_orders_split_across_two_baskets(self):
+        # LSER is claimed by both baskets, 0.018 apart. 0.031206 answers
+        # Photonics' 0.03120 claim; 0.013184 answers Optics & Storage's
+        # 0.01320. Each order has to find its own basket.
+        self.assertEqual(self.slug_for("LSER", 0.031206), "photonics-and-lasers-ind")
+        self.assertEqual(self.slug_for("LSER", 0.013184), "optics-and-storage-index")
 
-    def test_mu_goes_to_storage_because_semiconductor_claims_nothing(self):
-        self.assertEqual(self.slug_for("MU", 0.020247), "storage-and-memory-index")
+    def test_memx_goes_to_storage_because_broad_semis_claims_nothing(self):
+        # MEMX sits in both broad-semis-basket and optics-and-storage-index,
+        # but broad-semis has no snapshot, so it claims nothing and cannot win.
+        self.assertEqual(self.slug_for("MEMX", 0.020896), "optics-and-storage-index")
 
-    def test_the_first_nvda_order_goes_to_magnificent_seven(self):
-        self.assertEqual(self.slug_for("NVDA", 0.068659), "magnificent-7-index")
+    def test_the_basket_alfa_order_goes_to_core_growth(self):
+        self.assertEqual(self.slug_for("ALFA", 0.071204), "core-growth-index")
 
-    def test_the_standalone_nvda_order_is_unattributed(self):
-        # Bought 27 July outside any basket. Leaving it out is correct.
-        self.assertIsNone(self.slug_for("NVDA", 0.048067))
+    def test_the_standalone_alfa_order_is_unattributed(self):
+        # Bought six days later, outside any basket. Leaving it out is correct.
+        self.assertIsNone(self.slug_for("ALFA", 0.052140))
         ids = [o["id"] for o in self.unattributed]
-        self.assertIn("REDACTEDC5-0000-0000-0000-000000000023", ids)
+        self.assertIn("aa000001-0000-4000-8000-000000000001", ids)
 
     def test_exactly_one_order_is_unattributed(self):
         self.assertEqual(len(self.unattributed), 1)
@@ -160,16 +189,19 @@ class TestAttribution(unittest.TestCase):
         self.assertEqual(len(set(self.assignments)), len(self.assignments))
 
     def test_a_basket_without_a_snapshot_receives_no_orders(self):
-        owned = [s for s in self.assignments.values() if s == "semiconductor-etf-style"]
+        owned = [s for s in self.assignments.values() if s == "broad-semis-basket"]
         self.assertEqual(owned, [])
 
-    def test_tolerance_absorbs_the_observed_drift(self):
-        # IPGP is the worst real case: claimed 0.05193, filled 0.051824.
-        self.assertGreater(SHARE_TOLERANCE, 0.000106)
-        self.assertEqual(self.slug_for("IPGP", 0.051824), "optical-and-photonics-in")
+    def test_tolerance_absorbs_the_worst_drift(self):
+        # PHOT is the widest gap in the fixture between a lossy 5-decimal
+        # claim and the 6-decimal order that produced it: claimed 0.04780,
+        # filled 0.047688, so 0.000112 apart. The tolerance must absorb it.
+        self.assertGreater(SHARE_TOLERANCE, 0.000112)
+        self.assertEqual(self.slug_for("PHOT", 0.047688), "photonics-and-lasers-ind")
 
     def test_tolerance_is_tight_enough_to_separate_competing_claims(self):
-        # LITE's two claims differ by 0.018; the tolerance must be far below that.
+        # LSER's two claims differ by 0.018; the tolerance must be far below
+        # that, or one order could satisfy either basket.
         self.assertLess(SHARE_TOLERANCE, 0.018 / 2)
 
 
@@ -180,8 +212,8 @@ class TestBuildAndMigrate(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
-        self.watchlists = load("live_watchlists.json")
-        self.orders = load("live_orders.json")
+        self.watchlists = load(WATCHLISTS)
+        self.orders = load(ORDERS)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -213,8 +245,12 @@ class TestBuildAndMigrate(unittest.TestCase):
     def test_the_truncated_slug_is_regenerated(self):
         self.run_migration()
         slugs = set(self.state())
-        self.assertIn("optical-photonics-index", slugs)
-        self.assertNotIn("optical-and-photonics-in", slugs)
+        self.assertIn("photonics-lasers-index", slugs)
+        self.assertNotIn("photonics-and-lasers-ind", slugs)
+
+    def test_the_untruncated_24_char_slug_is_kept(self):
+        self.run_migration()
+        self.assertIn("optics-and-storage-index", set(self.state()))
 
     def test_weights_are_normalized_to_one_hundred(self):
         self.run_migration()
@@ -227,30 +263,34 @@ class TestBuildAndMigrate(unittest.TestCase):
 
     def test_the_one_hundred_and_twenty_basket_is_reported_as_changed(self):
         report = self.run_migration()
-        entry = [b for b in report["baskets"] if b["old_slug"] == "test-250"][0]
+        entry = [b for b in report["baskets"] if b["old_slug"] == "sum-120-test"][0]
         self.assertTrue(entry["weights_changed"])
 
     def test_positions_come_from_order_data_not_the_snapshot(self):
         self.run_migration()
-        mag7 = self.state()["magnificent-7-index"]
-        nvda = mag7.holdings["NVDA"].position
-        # The order filled 0.068659; the lossy snapshot said 0.06865.
-        self.assertAlmostEqual(nvda.shares, 0.068659, places=9)
-        self.assertAlmostEqual(nvda.avg_cost, 208.1299, places=4)
+        core = self.state()["core-growth-index"]
+        alfa = core.holdings["ALFA"].position
+        # The order filled 0.071204; the lossy snapshot said 0.07120. The
+        # position must carry the order's figure, not the snapshot's.
+        self.assertAlmostEqual(alfa.shares, 0.071204, places=9)
+        self.assertAlmostEqual(alfa.avg_cost, 210.5501, places=4)
 
     def test_the_unattributed_order_is_in_no_basket(self):
         self.run_migration()
         total = 0.0
         for basket in self.state().values():
-            holding = basket.holdings.get("NVDA")
-            if holding:
+            holding = basket.holdings.get("ALFA")
+            if holding and holding.has_position:
                 total += holding.position.shares
-        self.assertAlmostEqual(total, 0.068659, places=9)
+        # Only the attributed 0.071204; the stray 0.052140 is nowhere.
+        self.assertAlmostEqual(total, 0.071204, places=9)
 
     def test_the_report_names_the_unattributed_order(self):
         report = self.run_migration()
         self.assertEqual(len(report["unattributed"]), 1)
-        self.assertEqual(report["unattributed"][0]["symbol"], "NVDA")
+        self.assertEqual(report["unattributed"][0]["symbol"], "ALFA")
+        self.assertAlmostEqual(report["unattributed"][0]["shares"], 0.052140,
+                               places=9)
 
     def test_a_second_apply_changes_nothing(self):
         self.run_migration()
@@ -270,14 +310,14 @@ class TestBuildAndMigrate(unittest.TestCase):
 class TestMigrateCli(unittest.TestCase):
     """Drives migrate_v2.py as a subprocess, the way the controller will."""
 
-    UNATTRIBUTED_ID = "REDACTEDC5-0000-0000-0000-000000000023"
+    UNATTRIBUTED_ID = "aa000001-0000-4000-8000-000000000001"
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.dir = Path(self.tmp.name)
         self.script = str(ROOT / "skills" / "basket-manager" / "scripts" / "migrate_v2.py")
-        self.watchlists_text = (FIXTURES / "live_watchlists.json").read_text()
-        self.orders_text = (FIXTURES / "live_orders.json").read_text()
+        self.watchlists_text = (FIXTURES / WATCHLISTS).read_text()
+        self.orders_text = (FIXTURES / ORDERS).read_text()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -319,7 +359,7 @@ class TestMigrateCli(unittest.TestCase):
         code, out, err = self.run_cli("--format", "table")
         self.assertEqual(code, 0)
         self.assertIn("DRY RUN", out)
-        self.assertIn("NVDA", out)
+        self.assertIn("ALFA", out)
         self.assertIn(self.UNATTRIBUTED_ID, out)
 
     def test_table_format_prints_the_dry_run_banner_only_once(self):
@@ -533,22 +573,29 @@ class TestNormalizedWeightReport(unittest.TestCase):
         normalized, _ = normalize_basket_weights(original)
         self.assertEqual(weight_normalization_report(original, normalized), {})
 
-    def test_the_live_migration_report_shows_mag7s_per_symbol_changes(self):
+    def test_the_migration_report_shows_core_growths_per_symbol_changes(self):
         tmp = tempfile.TemporaryDirectory()
         try:
-            report = migrate(Path(tmp.name), load("live_watchlists.json"),
-                             load("live_orders.json"), None, "5PA00000",
-                             apply=False)
+            report = migrate(Path(tmp.name), load(WATCHLISTS), load(ORDERS),
+                             None, "5PA00000", apply=False)
         finally:
             tmp.cleanup()
         entry = [b for b in report["baskets"]
-                if b["old_slug"] == "magnificent-7-index"][0]
+                if b["old_slug"] == "core-growth-index"][0]
         normalized = entry["normalized"]
-        self.assertIn("NVDA", normalized)
-        self.assertAlmostEqual(normalized["NVDA"]["from"], 14.29)
-        self.assertEqual(normalized["NVDA"]["to"], 14)
-        self.assertAlmostEqual(normalized["AAPL"]["from"], 14.29)
-        self.assertEqual(normalized["AAPL"]["to"], 15)
+        # Four weights of 14.29 and three of 14.28 sum to exactly 100.0 but
+        # are not whole numbers. The two spare percent go to the largest
+        # remainders, alphabetically: ALFA and BETA reach 15, the rest 14.
+        self.assertEqual(set(normalized), set(
+            ["ALFA", "BETA", "GAMA", "DLTA", "EPSI", "ZETA", "IOTA"]))
+        self.assertAlmostEqual(normalized["ALFA"]["from"], 14.29)
+        self.assertEqual(normalized["ALFA"]["to"], 15)
+        self.assertAlmostEqual(normalized["BETA"]["from"], 14.29)
+        self.assertEqual(normalized["BETA"]["to"], 15)
+        self.assertAlmostEqual(normalized["GAMA"]["from"], 14.29)
+        self.assertEqual(normalized["GAMA"]["to"], 14)
+        self.assertAlmostEqual(normalized["IOTA"]["from"], 14.28)
+        self.assertEqual(normalized["IOTA"]["to"], 14)
 
 
 if __name__ == "__main__":

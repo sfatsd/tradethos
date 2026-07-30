@@ -1,0 +1,426 @@
+{
+ "data": {
+  "orders": [
+   {
+    "id": "aa000001-0000-4000-8000-000000000001",
+    "symbol": "ALFA",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.052140",
+    "cumulative_quantity": "0.052140",
+    "price": "211.480000",
+    "average_price": "212.480000",
+    "last_transaction_at": "2026-03-18T13:30:02.517Z",
+    "created_at": "2026-03-18T13:30:02.517Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "212.480000",
+      "quantity": "0.052140",
+      "timestamp": "2026-03-18T13:30:02.517Z"
+     }
+    ]
+   },
+   {
+    "id": "bb000001-0000-4000-8000-000000000001",
+    "symbol": "LSER",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.013184",
+    "cumulative_quantity": "0.013184",
+    "price": "839.604100",
+    "average_price": "840.604100",
+    "last_transaction_at": "2026-03-12T17:58:41.004Z",
+    "created_at": "2026-03-12T17:58:41.004Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "840.604100",
+      "quantity": "0.013184",
+      "timestamp": "2026-03-12T17:58:41.004Z"
+     }
+    ]
+   },
+   {
+    "id": "bb000002-0000-4000-8000-000000000002",
+    "symbol": "CTRL",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.074602",
+    "cumulative_quantity": "0.074602",
+    "price": "208.851200",
+    "average_price": "209.851200",
+    "last_transaction_at": "2026-03-12T17:58:38.83Z",
+    "created_at": "2026-03-12T17:58:38.83Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "209.851200",
+      "quantity": "0.074602",
+      "timestamp": "2026-03-12T17:58:38.83Z"
+     }
+    ]
+   },
+   {
+    "id": "bb000003-0000-4000-8000-000000000003",
+    "symbol": "FLSH",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.009603",
+    "cumulative_quantity": "0.009603",
+    "price": "1634.742600",
+    "average_price": "1635.742600",
+    "last_transaction_at": "2026-03-12T17:58:36.812Z",
+    "created_at": "2026-03-12T17:58:36.812Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "1635.742600",
+      "quantity": "0.009603",
+      "timestamp": "2026-03-12T17:58:36.812Z"
+     }
+    ]
+   },
+   {
+    "id": "bb000004-0000-4000-8000-000000000004",
+    "symbol": "TAPE",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.022497",
+    "cumulative_quantity": "0.022497",
+    "price": "924.418300",
+    "average_price": "925.418300",
+    "last_transaction_at": "2026-03-12T17:58:34.79Z",
+    "created_at": "2026-03-12T17:58:34.79Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "925.418300",
+      "quantity": "0.022497",
+      "timestamp": "2026-03-12T17:58:34.79Z"
+     }
+    ]
+   },
+   {
+    "id": "bb000005-0000-4000-8000-000000000005",
+    "symbol": "DISK",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.036904",
+    "cumulative_quantity": "0.036904",
+    "price": "563.093700",
+    "average_price": "564.093700",
+    "last_transaction_at": "2026-03-12T17:58:32.6Z",
+    "created_at": "2026-03-12T17:58:32.6Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "564.093700",
+      "quantity": "0.036904",
+      "timestamp": "2026-03-12T17:58:32.6Z"
+     }
+    ]
+   },
+   {
+    "id": "bb000006-0000-4000-8000-000000000006",
+    "symbol": "MEMX",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.020896",
+    "cumulative_quantity": "0.020896",
+    "price": "994.312400",
+    "average_price": "995.312400",
+    "last_transaction_at": "2026-03-12T17:58:30.755Z",
+    "created_at": "2026-03-12T17:58:30.755Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "995.312400",
+      "quantity": "0.020896",
+      "timestamp": "2026-03-12T17:58:30.755Z"
+     }
+    ]
+   },
+   {
+    "id": "cc000001-0000-4000-8000-000000000001",
+    "symbol": "WAVE",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.091803",
+    "cumulative_quantity": "0.091803",
+    "price": "113.903300",
+    "average_price": "114.903300",
+    "last_transaction_at": "2026-03-12T17:56:22.418Z",
+    "created_at": "2026-03-12T17:56:22.418Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "114.903300",
+      "quantity": "0.091803",
+      "timestamp": "2026-03-12T17:56:22.418Z"
+     }
+    ]
+   },
+   {
+    "id": "cc000002-0000-4000-8000-000000000002",
+    "symbol": "FIBR",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.029998",
+    "cumulative_quantity": "0.029998",
+    "price": "519.147900",
+    "average_price": "520.147900",
+    "last_transaction_at": "2026-03-12T17:56:20.331Z",
+    "created_at": "2026-03-12T17:56:20.331Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "520.147900",
+      "quantity": "0.029998",
+      "timestamp": "2026-03-12T17:56:20.331Z"
+     }
+    ]
+   },
+   {
+    "id": "cc000003-0000-4000-8000-000000000003",
+    "symbol": "BEAM",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.082605",
+    "cumulative_quantity": "0.082605",
+    "price": "314.786200",
+    "average_price": "315.786200",
+    "last_transaction_at": "2026-03-12T17:56:18.24Z",
+    "created_at": "2026-03-12T17:56:18.24Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "315.786200",
+      "quantity": "0.082605",
+      "timestamp": "2026-03-12T17:56:18.24Z"
+     }
+    ]
+   },
+   {
+    "id": "cc000004-0000-4000-8000-000000000004",
+    "symbol": "OPTX",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.050694",
+    "cumulative_quantity": "0.050694",
+    "price": "409.612800",
+    "average_price": "410.612800",
+    "last_transaction_at": "2026-03-12T17:56:16.109Z",
+    "created_at": "2026-03-12T17:56:16.109Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "410.612800",
+      "quantity": "0.050694",
+      "timestamp": "2026-03-12T17:56:16.109Z"
+     }
+    ]
+   },
+   {
+    "id": "cc000005-0000-4000-8000-000000000005",
+    "symbol": "PHOT",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.047688",
+    "cumulative_quantity": "0.047688",
+    "price": "97.417500",
+    "average_price": "98.417500",
+    "last_transaction_at": "2026-03-12T17:56:14.62Z",
+    "created_at": "2026-03-12T17:56:14.62Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "98.417500",
+      "quantity": "0.047688",
+      "timestamp": "2026-03-12T17:56:14.62Z"
+     }
+    ]
+   },
+   {
+    "id": "cc000006-0000-4000-8000-000000000006",
+    "symbol": "LSER",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.031206",
+    "cumulative_quantity": "0.031206",
+    "price": "839.238600",
+    "average_price": "840.238600",
+    "last_transaction_at": "2026-03-12T17:56:12.937Z",
+    "created_at": "2026-03-12T17:56:12.937Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "840.238600",
+      "quantity": "0.031206",
+      "timestamp": "2026-03-12T17:56:12.937Z"
+     }
+    ]
+   },
+   {
+    "id": "dd000001-0000-4000-8000-000000000001",
+    "symbol": "IOTA",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.127296",
+    "cumulative_quantity": "0.127296",
+    "price": "117.204700",
+    "average_price": "118.204700",
+    "last_transaction_at": "2026-03-12T17:54:35.842Z",
+    "created_at": "2026-03-12T17:54:35.842Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "118.204700",
+      "quantity": "0.127296",
+      "timestamp": "2026-03-12T17:54:35.842Z"
+     }
+    ]
+   },
+   {
+    "id": "dd000002-0000-4000-8000-000000000002",
+    "symbol": "ZETA",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.024403",
+    "cumulative_quantity": "0.024403",
+    "price": "611.751600",
+    "average_price": "612.751600",
+    "last_transaction_at": "2026-03-12T17:54:33.716Z",
+    "created_at": "2026-03-12T17:54:33.716Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "612.751600",
+      "quantity": "0.024403",
+      "timestamp": "2026-03-12T17:54:33.716Z"
+     }
+    ]
+   },
+   {
+    "id": "dd000003-0000-4000-8000-000000000003",
+    "symbol": "EPSI",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.063395",
+    "cumulative_quantity": "0.063395",
+    "price": "235.806300",
+    "average_price": "236.806300",
+    "last_transaction_at": "2026-03-12T17:54:31.508Z",
+    "created_at": "2026-03-12T17:54:31.508Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "236.806300",
+      "quantity": "0.063395",
+      "timestamp": "2026-03-12T17:54:31.508Z"
+     }
+    ]
+   },
+   {
+    "id": "dd000004-0000-4000-8000-000000000004",
+    "symbol": "DLTA",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.047102",
+    "cumulative_quantity": "0.047102",
+    "price": "319.108800",
+    "average_price": "320.108800",
+    "last_transaction_at": "2026-03-12T17:54:29.437Z",
+    "created_at": "2026-03-12T17:54:29.437Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "320.108800",
+      "quantity": "0.047102",
+      "timestamp": "2026-03-12T17:54:29.437Z"
+     }
+    ]
+   },
+   {
+    "id": "dd000005-0000-4000-8000-000000000005",
+    "symbol": "GAMA",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.046307",
+    "cumulative_quantity": "0.046307",
+    "price": "324.402900",
+    "average_price": "325.402900",
+    "last_transaction_at": "2026-03-12T17:54:27.22Z",
+    "created_at": "2026-03-12T17:54:27.22Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "325.402900",
+      "quantity": "0.046307",
+      "timestamp": "2026-03-12T17:54:27.22Z"
+     }
+    ]
+   },
+   {
+    "id": "dd000006-0000-4000-8000-000000000006",
+    "symbol": "BETA",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.039096",
+    "cumulative_quantity": "0.039096",
+    "price": "384.196400",
+    "average_price": "385.196400",
+    "last_transaction_at": "2026-03-12T17:54:25.114Z",
+    "created_at": "2026-03-12T17:54:25.114Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "385.196400",
+      "quantity": "0.039096",
+      "timestamp": "2026-03-12T17:54:25.114Z"
+     }
+    ]
+   },
+   {
+    "id": "dd000007-0000-4000-8000-000000000007",
+    "symbol": "ALFA",
+    "side": "buy",
+    "type": "market",
+    "state": "filled",
+    "quantity": "0.071204",
+    "cumulative_quantity": "0.071204",
+    "price": "209.550100",
+    "average_price": "210.550100",
+    "last_transaction_at": "2026-03-12T17:54:23.061Z",
+    "created_at": "2026-03-12T17:54:23.061Z",
+    "placed_agent": "agentic",
+    "executions": [
+     {
+      "price": "210.550100",
+      "quantity": "0.071204",
+      "timestamp": "2026-03-12T17:54:23.061Z"
+     }
+    ]
+   }
+  ]
+ }
+}

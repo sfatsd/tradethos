@@ -15,7 +15,7 @@ from basket_store import Position, replay, slugify, snapshot_dict
 def created(slug="mag7", name="Magnificent 7", **kw):
     return make_event("basket_created", slug, name=name,
                       description=kw.get("description", ""),
-                      account_number=kw.get("account_number", "000000000"),
+                      account_number=kw.get("account_number", "123456789"),
                       rebalance_threshold_pct=kw.get("threshold", 5.0),
                       ts=kw.get("ts", "2026-07-23T12:22:00Z"))
 

@@ -47,7 +47,7 @@ class CliTestCase(unittest.TestCase):
 
     def make_basket(self, name="Magnificent 7", symbols="NVDA:1,MSFT:1"):
         code, out, err = self.run_cli("create", name, "--symbols", symbols,
-                                      "--account", "000000000")
+                                      "--account", "123456789")
         self.assertEqual(code, 0, err)
         return out["slug"]
 
@@ -58,7 +58,7 @@ class TestCreate(CliTestCase):
         code, out, err = self.run_cli(
             "create", "Magnificent 7", "--symbols",
             "NVDA:1,MSFT:1,AAPL:1,GOOGL:1,AMZN:1,META:1,SPCX:1",
-            "--account", "000000000")
+            "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["slug"], "magnificent-7")
         weights = dict((h["symbol"], h["target_weight_pct"]) for h in out["holdings"])
@@ -69,7 +69,7 @@ class TestCreate(CliTestCase):
 
     def test_create_reports_the_weights_it_changed(self):
         code, out, _ = self.run_cli("create", "Trio", "--symbols", "A:1,B:1,C:1",
-                                    "--account", "000000000")
+                                    "--account", "123456789")
         self.assertEqual(code, 0)
         self.assertTrue(out["normalized"])
 
@@ -83,19 +83,19 @@ class TestCreate(CliTestCase):
     def test_a_duplicate_slug_is_refused(self):
         self.make_basket()
         code, _, err = self.run_cli("create", "Magnificent 7", "--symbols",
-                                    "NVDA:1", "--account", "000000000")
+                                    "NVDA:1", "--account", "123456789")
         self.assertEqual(code, 1)
         self.assertIn("SLUG_EXISTS", err)
 
     def test_a_zero_weight_is_refused(self):
         code, _, err = self.run_cli("create", "Bad", "--symbols", "NVDA:0,MSFT:1",
-                                    "--account", "000000000")
+                                    "--account", "123456789")
         self.assertEqual(code, 1)
         self.assertIn("NVDA", err)
 
     def test_symbols_become_upper_case(self):
         code, out, _ = self.run_cli("create", "Lower", "--symbols", "nvda:1",
-                                    "--account", "000000000")
+                                    "--account", "123456789")
         self.assertEqual(code, 0)
         self.assertEqual(out["holdings"][0]["symbol"], "NVDA")
 
@@ -177,7 +177,7 @@ class TestWeightCommands(CliTestCase):
     def three_holding_basket(self):
         code, out, err = self.run_cli(
             "create", "Trio", "--symbols", "NVDA:50,MSFT:30,AAPL:20",
-            "--account", "000000000")
+            "--account", "123456789")
         self.assertEqual(code, 0, err)
         return out["slug"]
 
@@ -325,7 +325,7 @@ class TestRecordFills(CliTestCase):
         CliTestCase.setUp(self)
         self.slug = self.make_basket(name="Trio", symbols="NVDA:50,MSFT:50")
 
-    def record(self, response, ids, account="000000000", *extra):
+    def record(self, response, ids, account="123456789", *extra):
         return self.run_cli("record-fills", self.slug, "--orders-json", response,
                             "--order-ids", ids, "--account", account, *extra)
 
@@ -381,7 +381,7 @@ class TestRecordFills(CliTestCase):
         self.record(orders_response(order()), "o1")
         code, _, err = self.run_cli("record-fills", other, "--orders-json",
                                     orders_response(order()), "--order-ids", "o1",
-                                    "--account", "000000000")
+                                    "--account", "123456789")
         # Nothing else was in the batch, so nothing was recorded.
         self.assertEqual(code, 1)
         self.assertIn("ORDER_IN_OTHER_BASKET", err)
@@ -395,7 +395,7 @@ class TestRecordFills(CliTestCase):
                   average_price="25.00"))
         code, out, err = self.run_cli(
             "record-fills", other, "--orders-json", batch,
-            "--order-ids", "taken,fresh", "--account", "000000000")
+            "--order-ids", "taken,fresh", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["fresh"])
         reasons = [s["reason"] for s in out["skipped"]]
@@ -439,7 +439,7 @@ class TestRecordFills(CliTestCase):
             order(order_id="s1", side="sell", quantity="25", average_price="70.00"))
         code, _, _ = self.record(big_sell, "s1")
         self.assertEqual(code, 1)
-        code, out, err = self.record(big_sell, "s1", "000000000", "--cap-at-held")
+        code, out, err = self.record(big_sell, "s1", "123456789", "--cap-at-held")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["capped"][0]["recorded_shares"], 10.0)
         shown = self.run_cli("show", self.slug)[1]
@@ -468,7 +468,7 @@ class TestRecordFills(CliTestCase):
 
     def test_cap_at_held_is_refused_for_more_than_one_id(self):
         response = orders_response(order(order_id="a"), order(order_id="b"))
-        code, _, err = self.record(response, "a,b", "000000000", "--cap-at-held")
+        code, _, err = self.record(response, "a,b", "123456789", "--cap-at-held")
         self.assertEqual(code, 1)
         self.assertIn("CAP_NEEDS_ONE_ORDER", err)
 
@@ -554,7 +554,7 @@ class TestFillOrdering(CliTestCase):
     def test_the_argument_order_does_not_change_the_result(self):
         code, out, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", self.batch(),
-            "--order-ids", "b1,b2,s1", "--account", "000000000")
+            "--order-ids", "b1,b2,s1", "--account", "123456789")
         self.assertEqual(code, 0, err)
         # Sorted into trade order before any event was built.
         self.assertEqual(out["recorded"], ["b1", "s1", "b2"])
@@ -575,7 +575,7 @@ class TestFillOrdering(CliTestCase):
                 slug = self.make_basket(name="Solo", symbols="NVDA:100")
                 code, _, err = self.run_cli(
                     "record-fills", slug, "--orders-json", self.batch(),
-                    "--order-ids", ids, "--account", "000000000")
+                    "--order-ids", ids, "--account", "123456789")
                 self.assertEqual(code, 0, err)
                 states.append(self.position(slug))
             finally:
@@ -589,12 +589,12 @@ class TestFillOrdering(CliTestCase):
         # tool records it - dropping a real fill is worse - but says so.
         code, _, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", self.batch(),
-            "--order-ids", "b2", "--account", "000000000")
+            "--order-ids", "b2", "--account", "123456789")
         self.assertEqual(code, 0, err)
 
         code, out, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", self.batch(),
-            "--order-ids", "b1", "--account", "000000000")
+            "--order-ids", "b1", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["b1"])
         self.assertEqual(len(out["late_fills"]), 1)
@@ -606,7 +606,7 @@ class TestFillOrdering(CliTestCase):
     def test_a_fill_in_sequence_is_not_reported_late(self):
         code, out, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", self.batch(),
-            "--order-ids", "b1,s1,b2", "--account", "000000000")
+            "--order-ids", "b1,s1,b2", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["late_fills"], [])
 
@@ -619,7 +619,7 @@ class TestFillOrdering(CliTestCase):
                   last_transaction_at="2026-01-05T15:00:00Z"))
         code, out, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", batch,
-            "--order-ids", "undated,dated", "--account", "000000000")
+            "--order-ids", "undated,dated", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["dated", "undated"])
         self.assertEqual(out["undated"], ["undated"])
@@ -633,7 +633,7 @@ class TestFillOrdering(CliTestCase):
                   last_transaction_at="2026-01-05T15:00:00Z"))
         code, out, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", batch,
-            "--order-ids", "junk,dated", "--account", "000000000")
+            "--order-ids", "junk,dated", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["dated", "junk"])
         self.assertEqual(out["undated"], ["junk"])
@@ -652,7 +652,7 @@ class TestFillOrdering(CliTestCase):
                   last_transaction_at="2026-01-02T15:00:00Z"))
         code, out, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", batch,
-            "--order-ids", "later,early", "--account", "000000000")
+            "--order-ids", "later,early", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["early", "later"])
         self.assertEqual(out["undated"], [])
@@ -662,7 +662,7 @@ class TestFillOrdering(CliTestCase):
         response = orders_response(order(order_id="o1"))
         code, out, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", response,
-            "--order-ids", "o1,o1", "--account", "000000000")
+            "--order-ids", "o1,o1", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["o1"])
         self.assertEqual(out["repeated_ids"], ["o1"])
@@ -822,7 +822,7 @@ class TestRealizedPnlIsProtected(CliTestCase):
                   last_transaction_at="2026-01-02T15:00:00Z"))
         code, _, err = self.run_cli(
             "record-fills", self.slug, "--orders-json", batch,
-            "--order-ids", "b1,s1", "--account", "000000000")
+            "--order-ids", "b1,s1", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(self.realized(), 800.00)
 
@@ -874,7 +874,7 @@ class TestSlugReuse(CliTestCase):
         response = orders_response(order(order_id="o1"))
         code, _, err = self.run_cli("record-fills", slug, "--orders-json",
                                     response, "--order-ids", "o1",
-                                    "--account", "000000000")
+                                    "--account", "123456789")
         self.assertEqual(code, 0, err)
         code, _, err = self.run_cli("delete", slug, "--force")
         self.assertEqual(code, 0, err)
@@ -883,7 +883,7 @@ class TestSlugReuse(CliTestCase):
         self.assertEqual(again, slug)
         code, out, err = self.run_cli("record-fills", again, "--orders-json",
                                       response, "--order-ids", "o1",
-                                      "--account", "000000000")
+                                      "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["o1"])
         self.assertEqual(out["already_recorded"], [])
@@ -898,13 +898,13 @@ class TestSlugReuse(CliTestCase):
         first = self.make_basket(name="First", symbols="NVDA:100")
         response = orders_response(order(order_id="o1"))
         self.run_cli("record-fills", first, "--orders-json", response,
-                     "--order-ids", "o1", "--account", "000000000")
+                     "--order-ids", "o1", "--account", "123456789")
         self.run_cli("delete", first, "--force")
 
         second = self.make_basket(name="Second", symbols="NVDA:100")
         code, out, err = self.run_cli("record-fills", second, "--orders-json",
                                       response, "--order-ids", "o1",
-                                      "--account", "000000000")
+                                      "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["o1"])
 
@@ -916,11 +916,11 @@ class TestSlugReuse(CliTestCase):
         response = orders_response(order(order_id="o1"))
         code, _, err = self.run_cli("record-fills", first, "--orders-json",
                                     response, "--order-ids", "o1",
-                                    "--account", "000000000")
+                                    "--account", "123456789")
         self.assertEqual(code, 0, err)
         code, _, err = self.run_cli("record-fills", second, "--orders-json",
                                     response, "--order-ids", "o1",
-                                    "--account", "000000000")
+                                    "--account", "123456789")
         self.assertEqual(code, 1)
         self.assertIn("ORDER_IN_OTHER_BASKET", err)
 
@@ -1035,7 +1035,7 @@ class TestPlanning(CliTestCase):
         response = orders_response(
             order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"))
         self.run_cli("record-fills", self.slug, "--orders-json", response,
-                     "--order-ids", "b1", "--account", "000000000")
+                     "--order-ids", "b1", "--account", "123456789")
         code, out, err = self.run_cli("plan-sell", self.slug, "--all")
         self.assertEqual(code, 0, err)
         shares = dict((r["symbol"], r["shares"]) for r in out["orders"])
@@ -1045,7 +1045,7 @@ class TestPlanning(CliTestCase):
         response = orders_response(
             order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"))
         self.run_cli("record-fills", self.slug, "--orders-json", response,
-                     "--order-ids", "b1", "--account", "000000000")
+                     "--order-ids", "b1", "--account", "123456789")
         code, out, err = self.run_cli("plan-sell", self.slug, "--all",
                                       "--prices", '{"NVDA": 70}')
         self.assertEqual(code, 0, err)
@@ -1057,7 +1057,7 @@ class TestPlanning(CliTestCase):
             order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"),
             order(order_id="b2", symbol="MSFT", quantity="10", average_price="25.00"))
         self.run_cli("record-fills", self.slug, "--orders-json", response,
-                     "--order-ids", "b1,b2", "--account", "000000000")
+                     "--order-ids", "b1,b2", "--account", "123456789")
         code, out, err = self.run_cli("plan-sell", self.slug, "--amount", "75",
                                       "--prices", '{"NVDA": 50, "MSFT": 25}')
         self.assertEqual(code, 0, err)
@@ -1070,7 +1070,7 @@ class TestPlanning(CliTestCase):
         response = orders_response(
             order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"))
         self.run_cli("record-fills", self.slug, "--orders-json", response,
-                     "--order-ids", "b1", "--account", "000000000")
+                     "--order-ids", "b1", "--account", "123456789")
         code, _, err = self.run_cli("plan-sell", self.slug, "--amount", "5000",
                                     "--prices", '{"NVDA": 50}')
         self.assertEqual(code, 1)
@@ -1096,7 +1096,7 @@ class TestVerifyAndBackup(CliTestCase):
         response = orders_response(
             order(order_id="b1", symbol="NVDA", quantity="10", average_price="50.00"))
         self.run_cli("record-fills", self.slug, "--orders-json", response,
-                     "--order-ids", "b1", "--account", "000000000")
+                     "--order-ids", "b1", "--account", "123456789")
 
     def test_claims_equal_position_is_correct(self):
         code, out, err = self.run_cli(
@@ -1235,13 +1235,13 @@ class TestVerifyPositionsAcrossBaskets(CliTestCase):
             "record-fills", self.alpha, "--orders-json",
             orders_response(order(order_id="a1", symbol="NVDA", quantity="6",
                                   average_price="50.00")),
-            "--order-ids", "a1", "--account", "000000000")
+            "--order-ids", "a1", "--account", "123456789")
         self.beta = self.make_basket(name="Beta", symbols="NVDA:100")
         self.run_cli(
             "record-fills", self.beta, "--orders-json",
             orders_response(order(order_id="b1", symbol="NVDA", quantity="5",
                                   average_price="55.00")),
-            "--order-ids", "b1", "--account", "000000000")
+            "--order-ids", "b1", "--account", "123456789")
 
     def test_unfiltered_verify_reports_the_combined_over_claim(self):
         code, out, err = self.run_cli(
