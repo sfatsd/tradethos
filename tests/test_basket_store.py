@@ -106,7 +106,8 @@ class TestReplayDefinition(unittest.TestCase):
 
     def test_an_older_event_version_is_accepted(self):
         # The log keeps every line forever, so a reader must accept an old
-        # shape. Section 9.5 of the design gives the rule.
+        # shape: a lower `v` than the current one is read on a best effort
+        # basis rather than rejected, and only a HIGHER `v` is refused.
         old_created = created()
         old_created["v"] = 0
         old_holding = holding(symbol="NVDA", weight=100)

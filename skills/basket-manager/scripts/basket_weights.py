@@ -14,7 +14,12 @@ FILL_MODES = (FILL_PROPORTIONAL, FILL_EQUAL)
 
 
 class WeightError(ValueError):
-    """A weight set breaks a rule from section 6.7 of the design."""
+    """A weight set breaks one of this module's rules.
+
+    Every weight must be a number above 0; a basket holds at most
+    MAX_HOLDINGS symbols; and no holding may round down to 0 percent once
+    the set is scaled to sum to exactly 100.
+    """
 
 
 def _check_input(weights):

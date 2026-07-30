@@ -193,7 +193,7 @@ $BASKET remove-holding storage-leaders --symbol MU --force   # even if it still 
 #### The Weight Change Loop
 
 The user says "raise WDC to 60 percent." This loop is how the agent must handle any weight
-change, per the design's safety rule: never write a weight change the user has not seen in
+change, per this tool's safety rule: never write a weight change the user has not seen in
 its final, normalized form.
 
 1. Run `set-weight storage-leaders --symbol WDC --weight 60 --dry-run`.

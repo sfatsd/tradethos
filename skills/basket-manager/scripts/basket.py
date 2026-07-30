@@ -2,7 +2,11 @@
 """The Tradethos basket command-line tool.
 
 Every write appends to the event log and then writes a snapshot export. No
-command reads a snapshot. Section 6 of the design document gives the rules.
+command reads a snapshot: the log is the only source of truth, and a snapshot
+is a derived view that can be deleted at any time and rebuilt by a replay. A
+basket's target weights are whole numbers that always sum to exactly 100, and
+every write goes through one code path, under one lock, so that invariant
+never breaks mid-write.
 """
 
 import argparse
@@ -340,8 +344,8 @@ def _apply_weights(store, args, slug, basket, new_weights, extra_events=()):
     """Write one batch of events, or return the dry-run view.
 
     Every weight command appends exactly once. Two appends would leave a
-    window in which the log breaks the sum-to-100 invariant that section 6.5
-    promises can never happen.
+    window in which the log breaks the invariant that a basket's target
+    weights always sum to exactly 100.
     """
     events = list(extra_events) + weight_events(basket, new_weights)
     if args.dry_run:
@@ -1069,13 +1073,15 @@ def cmd_verify(args, store):
                 if args.slug and other_holders:
                     warnings.append(
                         "Baskets claim %s shares of %s, but the account "
-                        "holds %s. %s also claims this symbol. Section 7.4 "
-                        "of the design gives the repair."
+                        "holds %s. %s also claims this symbol. You sold "
+                        "shares a basket claims: record that sale against "
+                        "whichever basket it came from, or buy the shares back."
                         % (claimed, symbol, actual, ", ".join(other_holders)))
                 else:
                     warnings.append(
-                        "Baskets claim %s shares of %s, but the account holds %s. "
-                        "Section 7.4 of the design gives the repair."
+                        "Baskets claim %s shares of %s, but the account holds "
+                        "%s. You sold shares this basket claims: record that "
+                        "sale against the basket, or buy the shares back."
                         % (claimed, symbol, actual))
             rows.append({"symbol": symbol, "claimed": round(claimed, 6),
                          "account": round(actual, 6), "state": state})
