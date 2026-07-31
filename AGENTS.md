@@ -31,6 +31,9 @@
 - Always use `get_equity_tradability` to verify a symbol is tradable before attempting an order.
 - Generate a fresh UUID `ref_id` for each new logical order. Reuse the same `ref_id` only when retrying a failed transport.
 
+## Writing Plans and Documentation
+- When you write plans or documentation, use ASD-STE100 Simplified Technical English (STE).
+
 ## Skill Coordination
 - Skills can reference each other. For example, the trade-executor skill can read basket data via `basket.py show` to suggest basket-aligned trades.
 - When suggesting cross-skill actions (e.g., "would you like to add this to a basket?"), frame them as offers, not automatic actions.
