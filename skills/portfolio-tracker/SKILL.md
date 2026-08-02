@@ -30,7 +30,7 @@ Trigger this skill when the user mentions:
 
 - **Formatting**: Present monetary values with proper formatting (e.g., `$1,234.56`). Present percentages to two decimal places (e.g., `12.34%`).
 - **Stock Context**: Always include symbol, current price, and day change context when presenting position breakdown or basket performance.
-- **Account Selection**: Never auto-default `account_number` from `get_accounts` — present available accounts and ask the user to choose or confirm, unless the user has already given a standing default account. Once given, reuse it across sessions rather than re-asking every time.
+- **Account Selection**: Default `account_number` to the account with `agentic_allowed: true` from `get_accounts`. Ask the user to choose only when more than one account has `agentic_allowed: true`, or when none do. If the user names a specific account, use that instead.
 - **Cross-Skill Offers**: Frame rebalancing trades or basket adjustments as optional suggestions/offers, never automatic actions.
 
 ## Available Data Sources
