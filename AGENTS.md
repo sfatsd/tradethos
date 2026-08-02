@@ -2,7 +2,7 @@
 
 ## General Rules
 - All brokerage operations that modify state (place/cancel orders, create watchlists) require **explicit user confirmation** before execution.
-- Never auto-default `account_number` from `get_accounts` — always present available accounts and ask the user to choose or confirm.
+- Never auto-default `account_number` from `get_accounts` — present available accounts and ask the user to choose or confirm, unless the user has already given a standing default account. Once a user states a default, treat it as standing across sessions (not just within one conversation) until they change it — don't re-ask every time.
 - Present monetary values with proper formatting (e.g., `$1,234.56`). Present percentages to two decimal places (e.g., `12.34%`).
 - When presenting stock data, always include the symbol, current price, and relevant context (e.g., day change).
 
