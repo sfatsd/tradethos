@@ -29,7 +29,7 @@ Trigger this skill when the user mentions:
 - **State-Modifying Confirmation**: All operations that modify state (place order, cancel order) require **explicit user confirmation** before execution.
 - **Formatting**: Present monetary values with proper formatting (e.g., `$1,234.56`). Present percentages to two decimal places (e.g., `12.34%`).
 - **Stock Context**: Always include symbol, current price, and day change context when presenting stock quotes.
-- **Account Selection**: Never auto-default `account_number` from `get_accounts` — always present available accounts and ask the user to choose or confirm.
+- **Account Selection**: Default `account_number` to the account with `agentic_allowed: true` from `get_accounts`. Ask the user to choose only when more than one account has `agentic_allowed: true`, or when none do. If the user names a specific account, use that instead.
 - **Research-First**: If the user hasn't researched a stock prior to wanting to buy, suggest running stock research first before placing orders.
 - **Config Resolution Hierarchy**: Order review policies & defaults resolve in 3 tiers: User explicit prompt request → Root `config.json` (`trading.require_review_by_default`) → Built-in skill fallback (`require_review = true`).
 
@@ -52,10 +52,10 @@ Skip the review step ONLY when the user has **very explicitly** asked to bypass:
 - ❌ "Place this order" — this is NOT a bypass
 
 ### Account Number Rules
-- **Never** auto-default `account_number` from `get_accounts`
-- If the user hasn't specified their account, call `get_accounts` and ask them to choose
-- Once established in a conversation, you can reuse the same account for subsequent orders
-- The account must have `agentic_allowed=true` — non-agentic accounts are rejected
+- Call `get_accounts` and default to the account with `agentic_allowed: true` — that's the only kind this agent can place trades in anyway.
+- Ask the user to choose only when more than one account has `agentic_allowed: true`, or when none do (nothing usable to default to).
+- If the user names a specific account, use that instead — but a non-agentic account is still rejected at order time.
+- Once established in a conversation, reuse the same account for subsequent orders without re-deriving it.
 
 ## Order Placement Workflow
 
