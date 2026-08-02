@@ -8,3 +8,8 @@ __pycache__/
 
 # Local agent settings (machine-specific)
 .claude/settings.local.json
+
+# Working notes from agent sessions: design specs, implementation plans, and
+# the subagent progress ledgers. Useful locally, not part of the shipped plugin.
+docs/superpowers/
+.superpowers/

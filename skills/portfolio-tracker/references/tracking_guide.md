@@ -28,7 +28,7 @@ Step 4: Present results
 
 ```
 Step 1: Load basket
-  └─ Fetch Watchlist via get_watchlists and decode Z64 metadata via watchlist_to_basket_dict
+  └─ basket-manager skill: basket.py show <slug> --prices '<json>'
 
 Step 2: Get current quotes
   └─ get_equity_quotes(symbols=[all holding symbols])
@@ -51,32 +51,29 @@ Step 4: Calculate basket totals
 Step 5: Present results
   ├─ Per-holding table with all metrics
   ├─ Basket summary row
-  └─ Holdings with no position shown as "No position"
+  ├─ Holdings with no position shown as "No position"
+  └─ Run basket.py verify <slug> --positions '<json>' and flag any over_claimed symbol
 ```
 
 ## Workflow: Basket Drift Analysis
 
 ```
-Step 1: Load basket
-  └─ Fetch Watchlist via get_watchlists and decode Z64 metadata via watchlist_to_basket_dict
+Step 1: Load basket and calculate drift
+  └─ basket-manager skill: calc_drift.py --slug <slug> --prices '<json>' [--threshold X]
+      → Returns actual_weight_pct, drift_pct, and status per holding
+        (on_target, minor_drift, significant_drift)
 
-Step 2: Get current quotes
+Step 2: Get current quotes (feeds --prices above)
   └─ get_equity_quotes(symbols=[all holding symbols])
 
-Step 3: Calculate actual weights
-  ├─ For each positioned holding: value = position.shares × current_price
-  ├─ total_basket_value = sum of all positioned holding values
-  └─ actual_weight[symbol] = value / total_basket_value × 100
+Step 3: Present target vs actual
+  For each holding, from the calc_drift.py output:
+  ├─ threshold resolution: --threshold flag || basket's own rebalance_threshold_pct
+  │   || config.json rebalancing.default_threshold_pct || 5.0%
+  ├─ on_target threshold: config.json rebalancing.on_target_threshold_pct || 2.0%
+  └─ A holding with no position reports status significant_drift when its target is above 0%
 
-Step 4: Compare target vs actual
-  For each holding:
-  ├─ drift = actual_weight - target_weight
-  ├─ threshold = basket rebalance_threshold_pct || config.json rebalancing.default_threshold_pct || 5.0%
-  ├─ on_target = config.json rebalancing.on_target_threshold_pct || 2.0%
-  ├─ flag = "on target" if |drift| ≤ on_target, "minor" if on_target < |drift| < threshold, "rebalance alert" if |drift| ≥ threshold
-  └─ If position is null → actual_weight = 0%, drift = -target_weight
-
-Step 5: Calculate rebalancing trades (if requested)
+Step 4: Calculate rebalancing trades (if requested)
   For each holding with drift:
   ├─ target_value = total_basket_value × target_weight / 100
   ├─ current_value = position.shares × current_price (or 0 if no position)
@@ -111,7 +108,9 @@ Step 4: Present results
 
 ## Average Cost Recalculation
 
-When reviewing basket positions, the avg_cost in the JSON is the source of truth. It's updated on each transaction:
+The event log is the source of truth for a basket's avg_cost; basket.py show reports the
+current value after replaying the log. This is background on the math behind that value —
+the agent never recalculates it by hand. It updates on each transaction:
 
 ### Buy
 ```
@@ -130,7 +129,8 @@ avg_cost stays the same
 
 ### Full Exit
 ```
-If new_shares == 0 → position becomes null (clean slate)
+If new_shares == 0 → shares and avg_cost reset to 0, realized_pnl is kept
+If realized_pnl is also 0 (never bought) → position reports as null
 ```
 
 ## Calculating Basket Concentration

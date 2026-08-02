@@ -188,13 +188,13 @@ When showing scan results:
 3. Show the total number of matching instruments
 4. For the top results, offer follow-up actions:
    - "Would you like to research any of these stocks?" → stock-researcher skill
-   - "Would you like to add any to a basket?" → basket-manager skill
+   - "Would you like to add any to a basket?" → basket-manager skill's `add-holding` command
    - "Would you like to buy any?" → trade-executor skill
 
 ## Cross-Skill Integration
 
 - After screening, suggest the **stock-researcher** skill for deeper analysis on top candidates
-- Offer to add screened stocks to a custom basket via the **basket-manager** skill
+- Offer to add screened stocks to a custom basket via the **basket-manager** skill's `add-holding` command
 - If the user wants to act on a screener result, route to the **trade-executor** skill
 - The **portfolio-tracker** skill can screen for drift opportunities (stocks that are underweight in a basket)
 

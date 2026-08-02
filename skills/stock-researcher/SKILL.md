@@ -114,10 +114,10 @@ When the user asks to compare two or more stocks:
 
 ## Cross-Skill Integration
 
-- After research, if the user is positive on the stock, offer to **add it to a custom basket** (basket-manager skill)
+- After research, if the user is positive on the stock, offer to **add it to a custom basket** — the basket-manager skill's `add-holding` command, with a target weight the user picks
 - If the user wants to act on research, suggest the **trade-executor** skill
 - Suggest using the **stock-screener** skill to find similar companies in the same sector
-- When a basket holding is being researched, note its target weight in the basket context
+- When a basket holding is being researched, note its target weight and thesis from `basket.py show`
 
 ## Parameter Guidelines
 
