@@ -784,6 +784,15 @@ class TestRecordFills(CliTestCase):
         self.assertEqual(out["recorded"], ["done"])
         self.assertEqual(out["skipped"][0]["reason"], "NOT_FILLED")
 
+    def test_the_result_has_no_undated_key(self):
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(order(order_id="o1", quantity="10",
+                                  average_price="10.00")),
+            "--order-ids", "o1", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("undated", out)
+
     def test_an_id_absent_from_the_response_is_skipped_not_aborted(self):
         code, out, err = self.run_cli(
             "record-fills", self.slug, "--orders-json",

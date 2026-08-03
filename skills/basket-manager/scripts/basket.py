@@ -766,7 +766,7 @@ def _order_fill_time(order):
 
 
 def sort_order_ids(order_ids, index):
-    """Return (sorted_ids, undated) with the ids in trade order.
+    """Return the ids in trade order.
 
     Average cost and realized profit and loss depend on the sequence the
     trades are applied in: a buy at 10, a sell at 15 and a buy at 20 give a
@@ -778,19 +778,18 @@ def sort_order_ids(order_ids, index):
     The sort key is the fill time, which is what the event's `ts` already
     carries. The raw strings are not comparable as text - they carry two to
     six fractional digits and may or may not end in `Z` - so each one is
-    parsed. An id with no usable time sorts last and is reported, never
-    silently dropped into an arbitrary slot. Ties keep the caller's order.
+    parsed. An id with no usable time sorts last. The required-field pre-pass
+    rejects such an order before the record step reaches it, so this only
+    holds a stable slot for an id the response does not name. Ties keep the
+    caller's order.
     """
     decorated = []
-    undated = []
     for position, order_id in enumerate(order_ids):
         order = index.get(order_id)
         stamp = parse_timestamp(_order_fill_time(order))
-        if stamp is None and order is not None:
-            undated.append(order_id)
         decorated.append((stamp is None, stamp or EPOCH, position, order_id))
     decorated.sort(key=lambda row: (row[0], row[1], row[2]))
-    return [row[3] for row in decorated], undated
+    return [row[3] for row in decorated]
 
 
 def _missing_required_fields(order):
@@ -874,7 +873,7 @@ def cmd_record_fills(args, store):
             % len(order_ids), "CAP_NEEDS_ONE_ORDER", {"count": len(order_ids)})
 
     index = orders_from_response(args.orders_json)
-    order_ids, undated = sort_order_ids(order_ids, index)
+    order_ids = sort_order_ids(order_ids, index)
 
     with store.log.locked():
         result, basket = store.require(args.slug)
@@ -997,7 +996,6 @@ def cmd_record_fills(args, store):
         "capped": capped,
         "late_fills": late,
         "repeated_ids": repeated,
-        "undated": undated,
         "holdings": snapshot_dict(basket)["holdings"],
     }
 
