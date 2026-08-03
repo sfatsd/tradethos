@@ -4,6 +4,31 @@ All notable changes to Tradethos are documented here. Versions follow
 [Semantic Versioning](https://semver.org/): breaking changes bump MINOR
 while the project is pre-1.0, fixes bump PATCH.
 
+## [Unreleased]
+
+**`record-fills` checks its input before it writes**
+
+`record-fills` reads five values from each order and validated four of them.
+A missing fill time fell through to the current time, so a trimmed or
+hand-built orders JSON recorded real fills under the wall-clock time of the
+command. The share counts and the prices stayed correct. The timestamps did
+not. The only signal was an `undated` list that the skill document never
+mentioned.
+
+- A pre-pass now checks every order named in `--order-ids` before the command
+  builds one event. A gap fails the whole call with `MISSING_REQUIRED_FIELDS`
+  and writes nothing. The error names every bad order and every absent field
+  in one report.
+- The check is state-aware. An order that is not filled has no price and no
+  fill time, and that data is correct. It stays a `NOT_FILLED` skip, so the
+  retry flow for an open limit order still works.
+- `_order_fill_time` reads the `executions[]` timestamp as a third source,
+  after `last_transaction_at` and `created_at`.
+- **Breaking:** the `undated` key is gone from the `record-fills` result. The
+  pre-pass makes the state unreachable, so the list was always empty.
+- The skip reasons `UNKNOWN_SIDE` and `NO_SHARES_OR_PRICE` are gone. Both were
+  bad-input signals, and the pre-pass reports them as missing fields.
+
 ## [0.3.0] — Local basket storage
 
 Custom baskets moved out of Robinhood watchlist descriptions and into a local

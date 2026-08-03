@@ -279,7 +279,10 @@ $BASKET record-fills storage-leaders \
   --account 123456789
 ```
 
-- `--orders-json` is the raw `get_equity_orders` response, unmodified.
+- `--orders-json` is the raw `get_equity_orders` response, unmodified. Do not build this
+  object by hand. Do not remove fields from it. The tool checks that each named order carries
+  every field it reads. If a field is absent, the tool fails the whole call with
+  `MISSING_REQUIRED_FIELDS` and writes nothing.
 - `--order-ids` is a comma-separated list of the order ids to record. The tool reads the
   symbol, the filled quantity, the fill price, and the side from each named order in the
   response, and appends one `buy` or `sell` event per order.
@@ -306,12 +309,23 @@ and reports `already_recorded`; retry a failed or uncertain call freely. A limit
 still open when `get_equity_orders` is first called just needs the same `record-fills` call
 again later, once it fills.
 
-**A batch records what it can.** `record-fills` applies each order id on its own. It records
-every order that passes, and it skips and reports every order that fails, with a reason
-(`ORDER_NOT_IN_RESPONSE`, `NOT_FILLED`, `ORDER_IN_OTHER_BASKET`, `SYMBOL_NOT_IN_BASKET`,
-`OVERSELL`, and so on). Exit code 0 means the log is now correct, not that every id succeeded
-— **read the `skipped` list and tell the user about every entry in it.** Exit code 1 means
-nothing was recorded at all.
+**A bad response stops everything.** Before the tool records one order, it checks each order
+named in `--order-ids`. Every order must carry `id`, `symbol`, `side` and `state`. An order
+with the state `filled` must also give a quantity, a price and a fill time. If one order fails
+this check, the tool raises `MISSING_REQUIRED_FIELDS`, names every bad order and every absent
+field, and writes nothing at all. Send the raw response again to correct this. A trimmed or
+hand-built object is the usual cause.
+
+**A batch records what it can.** After that check, `record-fills` applies each order id on its
+own. It records every order that passes, and it skips and reports every order that fails, with
+a reason (`ORDER_NOT_IN_RESPONSE`, `NOT_FILLED`, `ORDER_IN_OTHER_BASKET`,
+`SYMBOL_NOT_IN_BASKET`, `OVERSELL`, and so on). Exit code 0 means the log is now correct, not
+that every id succeeded — **read the `skipped` list and tell the user about every entry in
+it.** Exit code 1 means nothing was recorded at all.
+
+**Read the `late_fills` list also.** The tool puts an order in this list when its fill is older
+than a fill already recorded for the same symbol. The tool records the order, because it is
+better to keep a real fill than to drop it. Tell the user about each entry.
 
 `--cap-at-held` handles a sell order that mixes basket shares with shares held outside the
 basket: instead of skipping the oversized sell, the tool records a sale of exactly the shares

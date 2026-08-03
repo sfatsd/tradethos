@@ -741,14 +741,21 @@ def _order_fill_time(order):
     """Return the raw fill timestamp of an order, or None.
 
     `last_transaction_at` is the fill time and wins. `created_at` is the
-    fallback, and it is also the fallback when `last_transaction_at` holds
-    something no parser can read - a usable time in the second field beats an
-    unusable one in the first. The event's `ts` and the sort key both come
-    from here, so the log and the ordering can never disagree.
+    first fallback. The timestamp of the last execution is the second
+    fallback, because a response that carries executions always stamps them.
+    A usable time in a later field beats an unusable one in an earlier field.
+    The event's `ts` and the sort key both come from here, so the log and the
+    ordering can never disagree.
     """
     if not isinstance(order, dict):
         return None
     candidates = [order.get("last_transaction_at"), order.get("created_at")]
+    execution_ts = None
+    for execution in order.get("executions") or []:
+        if isinstance(execution, dict) and execution.get("timestamp"):
+            execution_ts = execution.get("timestamp")
+    if execution_ts:
+        candidates.append(execution_ts)
     for raw in candidates:
         if raw and parse_timestamp(raw) is not None:
             return raw
@@ -759,7 +766,7 @@ def _order_fill_time(order):
 
 
 def sort_order_ids(order_ids, index):
-    """Return (sorted_ids, undated) with the ids in trade order.
+    """Return the ids in trade order.
 
     Average cost and realized profit and loss depend on the sequence the
     trades are applied in: a buy at 10, a sell at 15 and a buy at 20 give a
@@ -771,19 +778,77 @@ def sort_order_ids(order_ids, index):
     The sort key is the fill time, which is what the event's `ts` already
     carries. The raw strings are not comparable as text - they carry two to
     six fractional digits and may or may not end in `Z` - so each one is
-    parsed. An id with no usable time sorts last and is reported, never
-    silently dropped into an arbitrary slot. Ties keep the caller's order.
+    parsed. An id with no usable time sorts last. The required-field pre-pass
+    rejects such an order before the record step reaches it, so this only
+    holds a stable slot for an id the response does not name. Ties keep the
+    caller's order.
     """
     decorated = []
-    undated = []
     for position, order_id in enumerate(order_ids):
         order = index.get(order_id)
         stamp = parse_timestamp(_order_fill_time(order))
-        if stamp is None and order is not None:
-            undated.append(order_id)
         decorated.append((stamp is None, stamp or EPOCH, position, order_id))
     decorated.sort(key=lambda row: (row[0], row[1], row[2]))
-    return [row[3] for row in decorated], undated
+    return [row[3] for row in decorated]
+
+
+def _missing_required_fields(order):
+    """Return the required values that an order does not supply.
+
+    A name in the list is absent or unusable. Both mean the same thing: the
+    JSON is not the raw `get_equity_orders` response. The three derived
+    values each have more than one source, so this function asks the same
+    helpers the record step asks. One rule, one answer - a check with its
+    own rule would pass an order here and then fail it below.
+
+    An order that is not filled has no price and no fill time, and that is
+    correct. The retry flow records such an order again after it fills, so
+    only the four always-present fields are required for it.
+    """
+    missing = []
+    for field in ("id", "symbol", "state"):
+        value = order.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing.append(field)
+    if (order.get("side") or "").lower() not in ("buy", "sell"):
+        missing.append("side")
+    if order.get("state") != "filled":
+        return missing
+    if _order_shares(order) <= 0:
+        missing.append("quantity")
+    if _order_price(order) <= 0:
+        missing.append("average_price")
+    if parse_timestamp(_order_fill_time(order)) is None:
+        missing.append("fill_time")
+    return missing
+
+
+def _check_required_fields(order_ids, index):
+    """Raise when any named order is missing a required value.
+
+    This runs before the command builds one event, so a bad batch writes
+    nothing at all. It reports every gap in every order in one error, so the
+    caller corrects the input one time instead of once per order.
+
+    An id that names no order in the response is not checked here. A missing
+    order is not a missing field: the response can be raw and correct, and
+    filtered to a shorter time window. That case stays a per-order
+    `ORDER_NOT_IN_RESPONSE` skip.
+    """
+    bad = []
+    for order_id in order_ids:
+        order = index.get(order_id)
+        if order is None:
+            continue
+        missing = _missing_required_fields(order)
+        if missing:
+            bad.append({"order_id": order_id, "missing": missing})
+    if bad:
+        raise CliError(
+            "The orders JSON does not carry every required field for %d "
+            "order(s). Pass the get_equity_orders response unmodified."
+            % len(bad),
+            "MISSING_REQUIRED_FIELDS", {"orders": bad})
 
 
 def cmd_record_fills(args, store):
@@ -808,7 +873,7 @@ def cmd_record_fills(args, store):
             % len(order_ids), "CAP_NEEDS_ONE_ORDER", {"count": len(order_ids)})
 
     index = orders_from_response(args.orders_json)
-    order_ids, undated = sort_order_ids(order_ids, index)
+    order_ids = sort_order_ids(order_ids, index)
 
     with store.log.locked():
         result, basket = store.require(args.slug)
@@ -819,6 +884,8 @@ def cmd_record_fills(args, store):
                 % (basket.account_number, args.account),
                 "ACCOUNT_MISMATCH",
                 {"basket_account": basket.account_number, "given": args.account})
+
+        _check_required_fields(order_ids, index)
 
         events = []
         recorded = []
@@ -864,17 +931,12 @@ def cmd_record_fills(args, store):
                                 "symbol": symbol})
                 continue
 
+            # The pre-pass proved that every filled order gives a positive
+            # quantity, a positive price, a usable fill time, and a side of
+            # buy or sell. Nothing below re-checks those.
             shares = _order_shares(order)
             price = _order_price(order)
-            if shares <= 0 or price <= 0:
-                skipped.append({"order_id": order_id, "reason": "NO_SHARES_OR_PRICE"})
-                continue
-
             side = (order.get("side") or "").lower()
-            if side not in ("buy", "sell"):
-                skipped.append({"order_id": order_id, "reason": "UNKNOWN_SIDE",
-                                "side": side})
-                continue
 
             if side == "sell":
                 held = pending.get(symbol, 0.0)
@@ -934,7 +996,6 @@ def cmd_record_fills(args, store):
         "capped": capped,
         "late_fills": late,
         "repeated_ids": repeated,
-        "undated": undated,
         "holdings": snapshot_dict(basket)["holdings"],
     }
 

@@ -588,6 +588,222 @@ class TestRecordFills(CliTestCase):
         self.assertEqual(code, 1)
         self.assertIn("between 1 and 100", err)
 
+    def events_log(self):
+        path = self.data_dir / "events.log.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()
+                if line.strip()]
+
+    def test_the_executions_timestamp_is_the_third_fill_time_source(self):
+        # The order carries no top-level time, so the only usable value is
+        # inside executions[]. A real response always has one there.
+        built = order(order_id="exec_ts", quantity="10",
+                      average_price="10.00",
+                      created_at=None, last_transaction_at=None)
+        built["executions"] = [{"price": "10.00", "quantity": "10",
+                                "timestamp": "2026-01-05T15:00:00Z"}]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "exec_ts", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["exec_ts"])
+        buys = [e for e in self.events_log() if e.get("order_id") == "exec_ts"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["ts"], "2026-01-05T15:00:00Z")
+
+    def test_a_top_level_time_beats_the_executions_timestamp(self):
+        built = order(order_id="both", quantity="10", average_price="10.00",
+                      created_at="2026-01-02T15:00:00Z",
+                      last_transaction_at="2026-01-03T15:00:00Z")
+        built["executions"] = [{"price": "10.00", "quantity": "10",
+                                "timestamp": "2026-01-09T15:00:00Z"}]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "both", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        buys = [e for e in self.events_log() if e.get("order_id") == "both"]
+        self.assertEqual(buys[0]["ts"], "2026-01-03T15:00:00Z")
+
+    def test_a_filled_order_with_no_fill_time_aborts_the_call(self):
+        built = order(order_id="notime", quantity="10", average_price="10.00",
+                      created_at=None, last_transaction_at=None)
+        built["executions"] = []
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "notime", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING_REQUIRED_FIELDS", err)
+        self.assertIn("fill_time", err)
+
+    def test_an_unparseable_fill_time_aborts_the_call(self):
+        built = order(order_id="junk", quantity="10", average_price="10.00",
+                      created_at="not a date",
+                      last_transaction_at="not a date")
+        built["executions"] = []
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "junk", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING_REQUIRED_FIELDS", err)
+
+    def test_the_error_names_every_bad_order_and_every_gap(self):
+        first = order(order_id="bad1", quantity="10", average_price="10.00",
+                      created_at=None, last_transaction_at=None)
+        first["executions"] = []
+        second = order(order_id="bad2", symbol="MSFT", quantity="10",
+                       average_price="10.00")
+        del second["side"]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(first, second),
+            "--order-ids", "bad1,bad2", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("bad1", err)
+        self.assertIn("bad2", err)
+        self.assertIn("fill_time", err)
+        self.assertIn("side", err)
+
+    def test_one_bad_order_stops_the_good_orders_too(self):
+        good = order(order_id="goodone", symbol="NVDA", quantity="10",
+                     average_price="10.00")
+        bad = order(order_id="badone", symbol="MSFT", quantity="10",
+                    average_price="10.00",
+                    created_at=None, last_transaction_at=None)
+        bad["executions"] = []
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(good, bad),
+            "--order-ids", "goodone,badone", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertNotIn("goodone", (self.data_dir / "events.log.jsonl").read_text())
+
+    def test_a_missing_symbol_id_or_state_aborts_the_call(self):
+        no_symbol = order(order_id="nosym", quantity="10",
+                          average_price="10.00")
+        del no_symbol["symbol"]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(no_symbol),
+            "--order-ids", "nosym", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING_REQUIRED_FIELDS", err)
+        self.assertIn("symbol", err)
+
+        no_state = order(order_id="nostate", quantity="10",
+                         average_price="10.00")
+        del no_state["state"]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(no_state),
+            "--order-ids", "nostate", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("state", err)
+
+    def test_the_log_is_unchanged_after_an_abort(self):
+        log = self.data_dir / "events.log.jsonl"
+        before = log.read_bytes()
+        built = order(order_id="notime", quantity="10", average_price="10.00",
+                      created_at=None, last_transaction_at=None)
+        built["executions"] = []
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "notime", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertEqual(log.read_bytes(), before)
+
+    def test_a_missing_side_aborts_instead_of_skipping(self):
+        built = order(order_id="noside", quantity="10", average_price="10.00")
+        del built["side"]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "noside", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING_REQUIRED_FIELDS", err)
+        self.assertNotIn("UNKNOWN_SIDE", err)
+
+    def test_an_unknown_side_value_aborts(self):
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(order(order_id="weird", side="transfer",
+                                  quantity="10", average_price="10.00")),
+            "--order-ids", "weird", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING_REQUIRED_FIELDS", err)
+
+    def test_no_price_anywhere_aborts_instead_of_skipping(self):
+        built = order(order_id="noprice", quantity="10", average_price=None)
+        built["executions"] = []
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "noprice", "--account", "123456789")
+        self.assertEqual(code, 1)
+        self.assertIn("MISSING_REQUIRED_FIELDS", err)
+        self.assertNotIn("NO_SHARES_OR_PRICE", err)
+
+    def test_the_executions_supply_the_price_when_average_price_is_absent(self):
+        built = order(order_id="execprice", quantity="10", average_price=None)
+        built["executions"] = [{"price": "12.00", "quantity": "10",
+                                "timestamp": "2026-01-05T15:00:00Z"}]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "execprice", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["execprice"])
+
+    def test_quantity_stands_in_for_a_missing_cumulative_quantity(self):
+        built = order(order_id="qty", quantity="10", average_price="10.00")
+        del built["cumulative_quantity"]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "qty", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["qty"])
+
+    def test_an_open_order_is_skipped_and_does_not_abort(self):
+        # The documented retry flow: record an open limit order, get
+        # NOT_FILLED, call again once it fills. An open order has no price
+        # and no fill time, and that data is correct.
+        built = order(order_id="openone", state="confirmed", quantity="10",
+                      average_price=None,
+                      created_at=None, last_transaction_at=None)
+        built["executions"] = []
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built, order(order_id="done", quantity="10",
+                                         average_price="10.00")),
+            "--order-ids", "openone,done", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["done"])
+        self.assertEqual(out["skipped"][0]["reason"], "NOT_FILLED")
+
+    def test_the_result_has_no_undated_key(self):
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(order(order_id="o1", quantity="10",
+                                  average_price="10.00")),
+            "--order-ids", "o1", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("undated", out)
+
+    def test_an_id_absent_from_the_response_is_skipped_not_aborted(self):
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(order(order_id="here", quantity="10",
+                                  average_price="10.00")),
+            "--order-ids", "here,ghost", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["here"])
+        reasons = [s["reason"] for s in out["skipped"]]
+        self.assertIn("ORDER_NOT_IN_RESPONSE", reasons)
+
 
 class TestFillOrdering(CliTestCase):
     """record-fills must apply orders in trade order, not argument order.
@@ -682,34 +898,6 @@ class TestFillOrdering(CliTestCase):
         self.assertEqual(code, 0, err)
         self.assertEqual(out["late_fills"], [])
 
-    def test_an_order_with_no_usable_time_sorts_last_and_is_reported(self):
-        batch = orders_response(
-            order(order_id="undated", quantity="10", average_price="10.00",
-                  created_at=None, last_transaction_at=None),
-            order(order_id="dated", quantity="10", average_price="20.00",
-                  created_at="2026-01-05T15:00:00Z",
-                  last_transaction_at="2026-01-05T15:00:00Z"))
-        code, out, err = self.run_cli(
-            "record-fills", self.slug, "--orders-json", batch,
-            "--order-ids", "undated,dated", "--account", "123456789")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(out["recorded"], ["dated", "undated"])
-        self.assertEqual(out["undated"], ["undated"])
-
-    def test_an_unparseable_time_sorts_last_and_is_reported(self):
-        batch = orders_response(
-            order(order_id="junk", quantity="10", average_price="10.00",
-                  created_at="not a date", last_transaction_at="not a date"),
-            order(order_id="dated", quantity="10", average_price="20.00",
-                  created_at="2026-01-05T15:00:00Z",
-                  last_transaction_at="2026-01-05T15:00:00Z"))
-        code, out, err = self.run_cli(
-            "record-fills", self.slug, "--orders-json", batch,
-            "--order-ids", "junk,dated", "--account", "123456789")
-        self.assertEqual(code, 0, err)
-        self.assertEqual(out["recorded"], ["dated", "junk"])
-        self.assertEqual(out["undated"], ["junk"])
-
     def test_an_unreadable_fill_time_falls_back_to_created_at(self):
         # A usable time in created_at beats an unusable last_transaction_at,
         # rather than dumping the order at the end of the batch.
@@ -727,7 +915,6 @@ class TestFillOrdering(CliTestCase):
             "--order-ids", "later,early", "--account", "123456789")
         self.assertEqual(code, 0, err)
         self.assertEqual(out["recorded"], ["early", "later"])
-        self.assertEqual(out["undated"], [])
         self.assertEqual(self.position()["realized_pnl"], 500.00)
 
     def test_a_repeated_id_in_one_batch_writes_one_event(self):
