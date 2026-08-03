@@ -793,6 +793,65 @@ def sort_order_ids(order_ids, index):
     return [row[3] for row in decorated], undated
 
 
+def _missing_required_fields(order):
+    """Return the required values that an order does not supply.
+
+    A name in the list is absent or unusable. Both mean the same thing: the
+    JSON is not the raw `get_equity_orders` response. The three derived
+    values each have more than one source, so this function asks the same
+    helpers the record step asks. One rule, one answer - a check with its
+    own rule would pass an order here and then fail it below.
+
+    An order that is not filled has no price and no fill time, and that is
+    correct. The retry flow records such an order again after it fills, so
+    only the four always-present fields are required for it.
+    """
+    missing = []
+    for field in ("id", "symbol", "state"):
+        value = order.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            missing.append(field)
+    if (order.get("side") or "").lower() not in ("buy", "sell"):
+        missing.append("side")
+    if order.get("state") != "filled":
+        return missing
+    if _order_shares(order) <= 0:
+        missing.append("quantity")
+    if _order_price(order) <= 0:
+        missing.append("average_price")
+    if parse_timestamp(_order_fill_time(order)) is None:
+        missing.append("fill_time")
+    return missing
+
+
+def _check_required_fields(order_ids, index):
+    """Raise when any named order is missing a required value.
+
+    This runs before the command builds one event, so a bad batch writes
+    nothing at all. It reports every gap in every order in one error, so the
+    caller corrects the input one time instead of once per order.
+
+    An id that names no order in the response is not checked here. A missing
+    order is not a missing field: the response can be raw and correct, and
+    filtered to a shorter time window. That case stays a per-order
+    `ORDER_NOT_IN_RESPONSE` skip.
+    """
+    bad = []
+    for order_id in order_ids:
+        order = index.get(order_id)
+        if order is None:
+            continue
+        missing = _missing_required_fields(order)
+        if missing:
+            bad.append({"order_id": order_id, "missing": missing})
+    if bad:
+        raise CliError(
+            "The orders JSON does not carry every required field for %d "
+            "order(s). Pass the get_equity_orders response unmodified."
+            % len(bad),
+            "MISSING_REQUIRED_FIELDS", {"orders": bad})
+
+
 def cmd_record_fills(args, store):
     given_ids = [i.strip() for i in args.order_ids.split(",") if i.strip()]
     if not given_ids:
@@ -826,6 +885,8 @@ def cmd_record_fills(args, store):
                 % (basket.account_number, args.account),
                 "ACCOUNT_MISMATCH",
                 {"basket_account": basket.account_number, "given": args.account})
+
+        _check_required_fields(order_ids, index)
 
         events = []
         recorded = []
@@ -871,17 +932,12 @@ def cmd_record_fills(args, store):
                                 "symbol": symbol})
                 continue
 
+            # The pre-pass proved that every filled order gives a positive
+            # quantity, a positive price, a usable fill time, and a side of
+            # buy or sell. Nothing below re-checks those.
             shares = _order_shares(order)
             price = _order_price(order)
-            if shares <= 0 or price <= 0:
-                skipped.append({"order_id": order_id, "reason": "NO_SHARES_OR_PRICE"})
-                continue
-
             side = (order.get("side") or "").lower()
-            if side not in ("buy", "sell"):
-                skipped.append({"order_id": order_id, "reason": "UNKNOWN_SIDE",
-                                "side": side})
-                continue
 
             if side == "sell":
                 held = pending.get(symbol, 0.0)
