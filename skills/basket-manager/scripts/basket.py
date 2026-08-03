@@ -741,14 +741,21 @@ def _order_fill_time(order):
     """Return the raw fill timestamp of an order, or None.
 
     `last_transaction_at` is the fill time and wins. `created_at` is the
-    fallback, and it is also the fallback when `last_transaction_at` holds
-    something no parser can read - a usable time in the second field beats an
-    unusable one in the first. The event's `ts` and the sort key both come
-    from here, so the log and the ordering can never disagree.
+    first fallback. The timestamp of the last execution is the second
+    fallback, because a response that carries executions always stamps them.
+    A usable time in a later field beats an unusable one in an earlier field.
+    The event's `ts` and the sort key both come from here, so the log and the
+    ordering can never disagree.
     """
     if not isinstance(order, dict):
         return None
     candidates = [order.get("last_transaction_at"), order.get("created_at")]
+    execution_ts = None
+    for execution in order.get("executions") or []:
+        if isinstance(execution, dict) and execution.get("timestamp"):
+            execution_ts = execution.get("timestamp")
+    if execution_ts:
+        candidates.append(execution_ts)
     for raw in candidates:
         if raw and parse_timestamp(raw) is not None:
             return raw

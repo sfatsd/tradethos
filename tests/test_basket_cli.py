@@ -588,6 +588,43 @@ class TestRecordFills(CliTestCase):
         self.assertEqual(code, 1)
         self.assertIn("between 1 and 100", err)
 
+    def events_log(self):
+        path = self.data_dir / "events.log.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()
+                if line.strip()]
+
+    def test_the_executions_timestamp_is_the_third_fill_time_source(self):
+        # The order carries no top-level time, so the only usable value is
+        # inside executions[]. A real response always has one there.
+        built = order(order_id="exec_ts", quantity="10",
+                      average_price="10.00",
+                      created_at=None, last_transaction_at=None)
+        built["executions"] = [{"price": "10.00", "quantity": "10",
+                                "timestamp": "2026-01-05T15:00:00Z"}]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "exec_ts", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        self.assertEqual(out["recorded"], ["exec_ts"])
+        buys = [e for e in self.events_log() if e.get("order_id") == "exec_ts"]
+        self.assertEqual(len(buys), 1)
+        self.assertEqual(buys[0]["ts"], "2026-01-05T15:00:00Z")
+
+    def test_a_top_level_time_beats_the_executions_timestamp(self):
+        built = order(order_id="both", quantity="10", average_price="10.00",
+                      created_at="2026-01-02T15:00:00Z",
+                      last_transaction_at="2026-01-03T15:00:00Z")
+        built["executions"] = [{"price": "10.00", "quantity": "10",
+                                "timestamp": "2026-01-09T15:00:00Z"}]
+        code, out, err = self.run_cli(
+            "record-fills", self.slug, "--orders-json",
+            orders_response(built),
+            "--order-ids", "both", "--account", "123456789")
+        self.assertEqual(code, 0, err)
+        buys = [e for e in self.events_log() if e.get("order_id") == "both"]
+        self.assertEqual(buys[0]["ts"], "2026-01-03T15:00:00Z")
+
 
 class TestFillOrdering(CliTestCase):
     """record-fills must apply orders in trade order, not argument order.
