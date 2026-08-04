@@ -233,3 +233,121 @@ class HarnessTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class BrokerCorrectnessTest(unittest.TestCase):
+    """Behaviours a fake has to get right to be worth trusting."""
+
+    def setUp(self):
+        self.broker = broker_state.Broker()
+        self.server = Server(self.broker)
+
+    def test_a_sell_reduces_the_holding_and_returns_cash(self):
+        # It used to add shares and take cash whatever the side, so a sell
+        # increased the position. No case sells today, but the grader
+        # accepts sell events, so this was a trap set for the next case.
+        before = self.broker.positions["WDC"]["quantity"]
+        cash = self.broker.cash
+        self.broker.place_equity_order(ACCOUNT, "WDC", "sell", "market",
+                                       quantity="0.02")
+        self.assertAlmostEqual(self.broker.positions["WDC"]["quantity"],
+                               before - 0.02, places=6)
+        self.assertGreater(self.broker.cash, cash)
+
+    def test_a_sell_cannot_exceed_the_holding(self):
+        with self.assertRaises(broker_state.BrokerError):
+            self.broker.place_equity_order(ACCOUNT, "WDC", "sell", "market",
+                                           quantity="99")
+
+    def test_a_sell_leaves_the_average_cost_alone(self):
+        before = self.broker.positions["WDC"]["average_buy_price"]
+        self.broker.place_equity_order(ACCOUNT, "WDC", "sell", "market",
+                                       quantity="0.01")
+        self.assertEqual(self.broker.positions["WDC"]["average_buy_price"],
+                         before)
+
+    def test_buying_power_is_enforced(self):
+        broker = broker_state.Broker(cash=10.0)
+        with self.assertRaises(broker_state.BrokerError):
+            broker.place_equity_order(ACCOUNT, "WDC", "buy", "market",
+                                      dollar_amount="5000")
+        self.assertEqual(broker.cash, 10.0)
+
+    def test_the_notional_reconciles_at_the_fill_price(self):
+        # Every real fill on 2026-08-03 came back within a hundredth of a
+        # cent of its dollar amount. Sizing the shares off the quote left
+        # the fake out by the spread, so an eval checking the arithmetic
+        # would have been measuring the fake rather than the agent.
+        order = self.broker.place_equity_order(
+            ACCOUNT, "NVDA", "buy", "market",
+            dollar_amount="50.00")["data"]["order"]
+        notional = (float(order["cumulative_quantity"])
+                    * float(order["average_price"]))
+        self.assertAlmostEqual(notional, 50.00, places=2)
+
+    def test_the_fill_price_is_still_not_the_quote(self):
+        order = self.broker.place_equity_order(
+            ACCOUNT, "NVDA", "buy", "market",
+            dollar_amount="50.00")["data"]["order"]
+        self.assertNotEqual(float(order["average_price"]),
+                            self.broker.quotes["NVDA"]["last"])
+
+    def test_a_rounded_up_fraction_does_not_widen_the_field(self):
+        stamp = broker_state._stamp(100.9999, 3)
+        self.assertRegex(stamp, r"\.\d{3}Z$")
+        self.assertEqual(stamp, "2026-08-03T00:01:41.000Z")
+
+    def test_strip_order_timestamps_removes_every_fill_time(self):
+        broker = broker_state.Broker(strip_order_timestamps=True)
+        broker.place_equity_order(ACCOUNT, "WDC", "buy", "market",
+                                  dollar_amount="20.00")
+        order = broker.get_equity_orders(ACCOUNT)["data"]["orders"][0]
+        self.assertNotIn("created_at", order)
+        self.assertNotIn("last_transaction_at", order)
+        self.assertNotIn("timestamp", order["executions"][0])
+
+    def test_run_scan_answers_the_question_it_was_asked(self):
+        losers = self.broker.run_scan(preset="daily_losers")["data"]["results"]
+        gainers = self.broker.run_scan(
+            preset="daily_gainers")["data"]["results"]
+        self.assertNotEqual(losers, gainers)
+        self.assertLess(float(losers[0]["percent_change"]),
+                        float(gainers[0]["percent_change"]))
+
+    def test_run_scan_rejects_an_unknown_scan_id(self):
+        with self.assertRaises(broker_state.BrokerError):
+            self.broker.run_scan(scan_id="never-created")
+
+
+class ServerRobustnessTest(unittest.TestCase):
+    """A bad argument is an agent mistake, not an infrastructure failure."""
+
+    def setUp(self):
+        self.server = Server(broker_state.Broker())
+
+    def probe(self, name, arguments):
+        return self.server.handle({"jsonrpc": "2.0", "id": 1,
+                                   "method": "tools/call",
+                                   "params": {"name": name,
+                                              "arguments": arguments}})
+
+    def test_an_unexpected_argument_returns_a_tool_error(self):
+        response = self.probe("get_accounts", {"account_number": "1"})
+        self.assertIn("result", response)
+
+    def test_a_missing_argument_returns_a_tool_error(self):
+        response = self.probe("get_equity_quotes", {})
+        self.assertIn("result", response)
+        self.assertNotIn("error", response)
+
+    def test_the_loop_survives_a_bad_call(self):
+        # The failure that matters: an unhandled TypeError killed serve()
+        # mid-run, and the eval then read as a harness failure rather than
+        # an agent failure - the most expensive kind of wrong result,
+        # because it discredits the suite instead of the agent.
+        self.probe("get_equity_positions", {"account_number": "1", "x": 2})
+        good = self.probe("get_accounts", {})
+        self.assertIn("accounts", good["result"]["content"][0]["text"])
+
+
+if __name__ == "__main__":
+    unittest.main()

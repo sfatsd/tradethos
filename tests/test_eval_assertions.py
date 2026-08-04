@@ -298,6 +298,34 @@ class RegistryTest(unittest.TestCase):
         names = [c["name"] for c in case_registry.ALL_CASES]
         self.assertEqual(len(names), len(set(names)))
 
+    def test_every_scenario_actually_builds_a_broker(self):
+        # Three lines that would have saved a case. `strip_order_timestamps`
+        # sat in a scenario for a while without being a Broker parameter,
+        # so the one case reproducing the original defect could not run at
+        # all - and nothing said so, because no test ever constructed the
+        # world a case describes.
+        from evals.fake_mcp import state as broker_state
+        for case in case_registry.ALL_CASES:
+            try:
+                broker_state.Broker(**(case.get("scenario") or {}))
+            except TypeError as error:
+                self.fail("scenario for %s does not build: %s"
+                          % (case["name"], error))
+
+    def test_no_case_carries_a_flag_nothing_consumes(self):
+        # `expect_verify` was set on two cases and read by nothing, so those
+        # cases claimed a check they never made. A flag with no consumer is
+        # a promise the suite does not keep.
+        consumed = {"name", "skill", "prompt", "scenario", "assertions",
+                    "basket", "second_basket", "judgment",
+                    "record_fills_grader", "user_never_confirms",
+                    "preclaim_order"}
+        for case in case_registry.ALL_CASES:
+            unknown = set(case) - consumed
+            self.assertEqual(unknown, set(),
+                             "%s carries unconsumed key(s) %s"
+                             % (case["name"], unknown))
+
     def test_every_assertion_runs_on_an_empty_run(self):
         # A grader that raises on a sparse run cannot report a failure, it
         # just crashes the eval. Every assertion has to return a verdict on

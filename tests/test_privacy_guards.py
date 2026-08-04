@@ -134,3 +134,134 @@ class ScannerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class StagedBlobTest(unittest.TestCase):
+    """The bug that made the pre-commit use case useless.
+
+    The first version took file names from `git diff --cached` and then
+    opened those paths from disk. A secret staged and then edited out of the
+    working tree read as clean, while the index still held it. The two
+    sources usually agree, which is exactly why it stayed quiet: the demo
+    that "proved" the guard worked had matching content in both.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name)
+        self.git("init", "-q", ".")
+        self.git("config", "user.email", "t@example.com")
+        self.git("config", "user.name", "t")
+
+    def git(self, *args):
+        return subprocess.run(("git",) + args, cwd=str(self.repo),
+                              capture_output=True, text=True)
+
+    def run_guard(self, *args):
+        return subprocess.run(
+            [sys.executable, "-m", "evals.check_no_real_data"] + list(args),
+            cwd=str(self.repo), capture_output=True, text=True,
+            env=dict(os.environ, PYTHONPATH=str(ROOT)))
+
+    def test_a_secret_staged_then_edited_out_is_still_caught(self):
+        (self.repo / "leak.py").write_text('SECRET = "999888777"\n')
+        self.git("add", "leak.py")
+        (self.repo / "leak.py").write_text('SECRET = "clean"\n')
+        (self.repo / ".private-values").write_text("999888777\n")
+
+        result = self.run_guard("--staged")
+        self.assertEqual(result.returncode, 1,
+                         "the staged blob still holds the secret\n"
+                         + result.stdout + result.stderr)
+        self.assertIn("leak.py", result.stderr)
+
+    def test_a_clean_staged_blob_passes(self):
+        (self.repo / "ok.py").write_text('VALUE = "nothing here"\n')
+        self.git("add", "ok.py")
+        (self.repo / ".private-values").write_text("999888777\n")
+        self.assertEqual(self.run_guard("--staged").returncode, 0)
+
+    def test_a_git_failure_is_not_reported_as_clean(self):
+        # Outside a repository the first version produced an empty file
+        # list and a confident "clean". A guard whose failure mode is
+        # silent success has the one failure mode it cannot have.
+        #
+        # The directory has to sit outside self.repo, not under it: git
+        # walks upward, so a subdirectory of a repository is still in that
+        # repository and the call would succeed.
+        other = tempfile.TemporaryDirectory()
+        self.addCleanup(other.cleanup)
+        outside = Path(other.name)
+        (outside / ".private-values").write_text("999888777\n")
+        result = subprocess.run(
+            [sys.executable, "-m", "evals.check_no_real_data"],
+            cwd=str(outside), capture_output=True, text=True,
+            env=dict(os.environ, PYTHONPATH=str(ROOT)))
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("could not run", result.stderr)
+
+
+class MatchingTest(unittest.TestCase):
+
+    def test_short_values_are_rejected_not_matched(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".txt",
+                                         delete=False) as handle:
+            handle.write("# short\n42\n999888777\n")
+            path = handle.name
+        self.addCleanup(os.remove, path)
+        self.assertEqual(guard.read_values(path), ["999888777"])
+
+    def test_a_listed_number_does_not_match_inside_a_longer_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "f.txt")
+            with open(path, "w") as handle:
+                handle.write("total 1590.055 here\n")
+            self.assertEqual(guard.scan([path], ["590.05"]), [])
+
+    def test_a_listed_number_matches_when_it_stands_alone(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "f.txt")
+            with open(path, "w") as handle:
+                handle.write("total 590.05 here\n")
+            self.assertEqual(len(guard.scan([path], ["590.05"])), 1)
+
+
+class MaskingBreadthTest(unittest.TestCase):
+
+    def test_an_account_inside_a_url_is_rewritten(self):
+        payload = {"order": {
+            "account": "https://api.robinhood.com/accounts/998877665/",
+            "account_id": "998877665"}}
+        masked = cf.mask_accounts(payload, {})
+        blob = str(masked)
+        self.assertNotIn("998877665", blob)
+        self.assertIn("accounts/", masked["order"]["account"])
+
+    def test_three_accounts_get_three_placeholders(self):
+        payload = {"a": [{"account_number": "111111111"},
+                         {"account_number": "222222222"},
+                         {"account_number": "333333333"}]}
+        masked = cf.mask_accounts(payload, {})
+        values = [x["account_number"] for x in masked["a"]]
+        self.assertEqual(len(set(values)), 3, values)
+
+    def test_the_same_account_keeps_one_placeholder(self):
+        payload = {"a": [{"account_number": "111111111"},
+                         {"account_number": "111111111"}]}
+        masked = cf.mask_accounts(payload, {})
+        values = [x["account_number"] for x in masked["a"]]
+        self.assertEqual(len(set(values)), 1)
+
+    def test_the_sweep_catches_a_value_under_an_unlisted_key(self):
+        # An allowlist of key names only covers the shapes someone thought
+        # of. The sweep is what covers the rest.
+        payload = {"account_number": "998877665",
+                   "some_unlisted_key": "998877665"}
+        masked = cf.mask_accounts(payload, {})
+        with self.assertRaises(SystemExit) as caught:
+            cf.verify_masked(payload, masked)
+        self.assertIn("998877665", str(caught.exception))
+
+
+if __name__ == "__main__":
+    unittest.main()

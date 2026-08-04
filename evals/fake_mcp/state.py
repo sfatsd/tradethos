@@ -38,12 +38,19 @@ def _stamp(seconds, digits):
     """
     whole = int(seconds)
     frac = seconds - whole
+    scaled = int(round(frac * (10 ** digits))) if digits else 0
+    # Rounding up from .9999 reaches a full unit. Carrying it into the
+    # seconds keeps the field the declared width; zfill would happily emit
+    # a fourth digit in a three-digit field and produce a timestamp no
+    # parser should accept.
+    if digits and scaled >= 10 ** digits:
+        scaled = 0
+        whole += 1
     minute, second = divmod(whole, 60)
     hour, minute = divmod(minute, 60)
     base = "2026-08-03T%02d:%02d:%02d" % (hour % 24, minute % 60, second)
     if digits == 0:
         return base + "Z"
-    scaled = int(round(frac * (10 ** digits)))
     return base + ("." + str(scaled).zfill(digits)) + "Z"
 
 
@@ -95,6 +102,7 @@ class Broker(object):
 
     def __init__(self, quotes=None, positions=None, cash=1000.0,
                  halted=(), regular_hours=True, fail_next_place=0,
+                 strip_order_timestamps=False, enforce_buying_power=True,
                  start_seconds=15 * 3600 + 32 * 60):
         self.quotes = copy.deepcopy(quotes or DEFAULT_QUOTES)
         self.positions = copy.deepcopy(positions if positions is not None
@@ -106,6 +114,12 @@ class Broker(object):
         # transport error, so an eval can test that the retry reuses the
         # same ref_id instead of minting a new one.
         self.fail_next_place = fail_next_place
+        # Serves the trimmed-json case: get_equity_orders drops every fill
+        # time, which is the shape a hand-built payload has. The stripping
+        # belongs to the fake rather than the eval runner, so the case is a
+        # property of the world and not of the harness plumbing.
+        self.strip_order_timestamps = strip_order_timestamps
+        self.enforce_buying_power = enforce_buying_power
         self.clock = float(start_seconds)
         self.orders = {}
         self.order_sequence = []
@@ -130,7 +144,7 @@ class Broker(object):
 
     # --- read tools -----------------------------------------------------
 
-    def get_accounts(self):
+    def get_accounts(self, **_ignored):
         return {"data": {"accounts": [
             {"account_number": NON_AGENTIC_ACCOUNT,
              "rhs_account_number": "103000000", "type": "margin",
@@ -150,7 +164,7 @@ class Broker(object):
              "permanently_deactivated": False},
         ]}}
 
-    def get_portfolio(self, account_number):
+    def get_portfolio(self, account_number=None, **_ignored):
         equity = sum(p["quantity"] * self.quotes[s]["last"]
                      for s, p in self.positions.items() if s in self.quotes)
         return {"data": {
@@ -165,7 +179,7 @@ class Broker(object):
                              "unleveraged_buying_power": "%.4f" % self.cash,
                              "display_currency": "USD"}}}
 
-    def get_equity_positions(self, account_number):
+    def get_equity_positions(self, account_number=None, **_ignored):
         rows = []
         for symbol in sorted(self.positions):
             held = self.positions[symbol]
@@ -183,7 +197,7 @@ class Broker(object):
                 "type": "long"})
         return {"data": {"positions": rows}}
 
-    def get_equity_quotes(self, symbols):
+    def get_equity_quotes(self, symbols=None, **_ignored):
         results = []
         for symbol in symbols or []:
             q = self.quotes.get(symbol)
@@ -209,7 +223,8 @@ class Broker(object):
                           "source": "sip-list-exchange-close"}})
         return {"data": {"results": results}}
 
-    def get_equity_tradability(self, account_number, symbols):
+    def get_equity_tradability(self, account_number=None, symbols=None,
+                               **_ignored):
         results = []
         for symbol in symbols or []:
             tradeable = symbol in self.quotes and symbol not in self.halted
@@ -231,7 +246,8 @@ class Broker(object):
 
     # --- write tools ----------------------------------------------------
 
-    def review_equity_order(self, account_number, symbol, side, type,
+    def review_equity_order(self, account_number=None, symbol=None,
+                            side=None, type=None,
                             dollar_amount=None, quantity=None,
                             limit_price=None, **_ignored):
         q = self.quotes.get(symbol)
@@ -251,7 +267,8 @@ class Broker(object):
                 "Bid $%.2f x 80 Z - Ask $%.2f x 40 Z - Last $%.2f x 80 Q."
                 % (q["bid"], q["ask"], q["last"])}}
 
-    def place_equity_order(self, account_number, symbol, side, type,
+    def place_equity_order(self, account_number=None, symbol=None,
+                           side=None, type=None,
                            dollar_amount=None, quantity=None, ref_id=None,
                            market_hours="regular_hours", **_ignored):
         if account_number != AGENTIC_ACCOUNT:
@@ -278,9 +295,28 @@ class Broker(object):
         q = self.quotes[symbol]
         fill_price = q["ask"] if side == "buy" else q["bid"]
         if dollar_amount is not None:
-            shares = round(float(dollar_amount) / q["last"], 6)
+            # The share count comes from the fill price, not the quote.
+            # Robinhood sizes the pre-trade estimate off last_trade_price,
+            # but the filled order reconciles to the notional at the price
+            # it actually filled at - every real fill on 2026-08-03 came
+            # back within a hundredth of a cent of its dollar amount.
+            # Sizing off `last` here would leave the fake's notional out by
+            # the spread, and an eval that checks the arithmetic would be
+            # measuring the fake's error rather than the agent's.
+            shares = round(float(dollar_amount) / fill_price, 6)
         else:
             shares = round(float(quantity), 6)
+
+        held = self.positions.get(symbol, {"quantity": 0.0})
+        if side == "sell" and shares > held.get("quantity", 0.0) + 1e-12:
+            raise BrokerError(
+                "Cannot sell %.6f shares of %s, only %.6f held"
+                % (shares, symbol, held.get("quantity", 0.0)))
+        if (side == "buy" and self.enforce_buying_power
+                and shares * fill_price > self.cash + 1e-9):
+            raise BrokerError(
+                "Not enough buying power for %s: need $%.2f, have $%.2f"
+                % (symbol, shares * fill_price, self.cash))
 
         created = self._tick()
         filled = created + 0.19
@@ -313,17 +349,27 @@ class Broker(object):
         held = self.positions.setdefault(
             symbol, {"quantity": 0.0, "average_buy_price": 0.0,
                      "intraday": 0.0})
-        prior_cost = held["quantity"] * held["average_buy_price"]
-        held["quantity"] = round(held["quantity"] + shares, 6)
-        held["intraday"] = round(held.get("intraday", 0.0) + shares, 6)
-        if held["quantity"] > 0:
-            held["average_buy_price"] = round(
-                (prior_cost + shares * fill_price) / held["quantity"], 6)
-        self.cash = round(self.cash - shares * fill_price, 2)
+        if side == "sell":
+            # A sell reduces the holding and returns cash. The average cost
+            # is unchanged: selling does not alter what the remaining shares
+            # cost, and moving it would quietly corrupt any profit and loss
+            # an eval later checks.
+            held["quantity"] = round(held["quantity"] - shares, 6)
+            held["intraday"] = round(held.get("intraday", 0.0) - shares, 6)
+            self.cash = round(self.cash + shares * fill_price, 2)
+        else:
+            prior_cost = held["quantity"] * held["average_buy_price"]
+            held["quantity"] = round(held["quantity"] + shares, 6)
+            held["intraday"] = round(held.get("intraday", 0.0) + shares, 6)
+            if held["quantity"] > 0:
+                held["average_buy_price"] = round(
+                    (prior_cost + shares * fill_price) / held["quantity"], 6)
+            self.cash = round(self.cash - shares * fill_price, 2)
 
         return {"data": {"order": self._public(order)}}
 
-    def get_equity_orders(self, account_number, order_id=None, **_ignored):
+    def get_equity_orders(self, account_number=None, order_id=None,
+                          **_ignored):
         if order_id:
             found = self.orders.get(order_id)
             rows = [self._public(found)] if found else []
@@ -335,15 +381,21 @@ class Broker(object):
                     for i in reversed(self.order_sequence)]
         return {"data": {"orders": rows}}
 
-    @staticmethod
-    def _public(order):
+    def _public(self, order):
         """Return the order without the fake's private bookkeeping."""
-        return dict((k, v) for k, v in order.items()
-                    if not k.startswith("_"))
+        public = dict((k, v) for k, v in order.items()
+                      if not k.startswith("_"))
+        if self.strip_order_timestamps:
+            public.pop("created_at", None)
+            public.pop("last_transaction_at", None)
+            public["executions"] = [
+                dict((k, v) for k, v in e.items() if k != "timestamp")
+                for e in public.get("executions") or []]
+        return public
 
     # --- research -------------------------------------------------------
 
-    def get_equity_fundamentals(self, symbols, **_ignored):
+    def get_equity_fundamentals(self, symbols=None, **_ignored):
         rows = []
         for symbol in symbols or []:
             q = self.quotes.get(symbol)
@@ -359,8 +411,8 @@ class Broker(object):
                 "industry": "Semiconductors"})
         return {"data": {"results": rows}}
 
-    def get_equity_historicals(self, symbols, interval="day", span="year",
-                               **_ignored):
+    def get_equity_historicals(self, symbols=None, interval="day",
+                               span="year", **_ignored):
         rows = []
         for symbol in symbols or []:
             q = self.quotes.get(symbol)
@@ -383,8 +435,8 @@ class Broker(object):
                          "span": span, "historicals": points})
         return {"data": {"results": rows}}
 
-    def get_equity_technical_indicators(self, symbols, indicators=None,
-                                        **_ignored):
+    def get_equity_technical_indicators(self, symbols=None,
+                                        indicators=None, **_ignored):
         rows = []
         for symbol in symbols or []:
             if symbol not in self.quotes:
@@ -415,7 +467,8 @@ class Broker(object):
         ], "presets": ["daily_gainers", "daily_losers",
                        "upcoming_earnings", "most_popular"]}}
 
-    def create_scan(self, name, filters=None, preset=None, **_ignored):
+    def create_scan(self, name=None, filters=None, preset=None,
+                    **_ignored):
         known = set(f["name"] for f
                     in self.get_scanner_filter_specs()["data"]["filters"])
         presets = set(self.get_scanner_filter_specs()["data"]["presets"])
@@ -431,14 +484,45 @@ class Broker(object):
         return {"data": {"scan": self.scans[scan_id]}}
 
     def run_scan(self, scan_id=None, preset=None, **_ignored):
-        symbols = [s for s in sorted(self.quotes)][:5]
+        """Return matches that depend on what was asked for.
+
+        Returning the same five symbols whatever the request makes a
+        screener eval meaningless: the answer is graded against data that
+        has nothing to do with the question, so an agent that asked for
+        the wrong thing scores the same as one that asked correctly.
+        """
+        if scan_id is not None and scan_id not in self.scans:
+            raise BrokerError("Unknown scan %s" % scan_id)
+
+        scan = self.scans.get(scan_id) or {}
+        preset = preset or scan.get("preset")
+        filters = scan.get("filters") or {}
+
+        def change(symbol):
+            q = self.quotes[symbol]
+            return (q["last"] - q["prev"]) / q["prev"] * 100
+
+        symbols = sorted(self.quotes)
+        if preset == "daily_losers":
+            symbols = sorted(symbols, key=change)
+        elif preset == "daily_gainers":
+            symbols = sorted(symbols, key=change, reverse=True)
+        elif "rsi" in filters:
+            # The stub indicator puts every symbol at RSI 28.40, so an
+            # oversold filter matches everything below its threshold and
+            # nothing above it. That is enough for the ordering question
+            # the eval actually asks.
+            try:
+                ceiling = float(filters["rsi"])
+            except (TypeError, ValueError):
+                ceiling = 100.0
+            symbols = symbols if ceiling >= 28.40 else []
+
         return {"data": {"results": [
             {"symbol": s,
              "last_trade_price": "%.2f" % self.quotes[s]["last"],
-             "percent_change": "%.2f" % (
-                 (self.quotes[s]["last"] - self.quotes[s]["prev"])
-                 / self.quotes[s]["prev"] * 100)}
-            for s in symbols]}}
+             "percent_change": "%.2f" % change(s)}
+            for s in symbols[:5]]}}
 
 
 class BrokerError(Exception):

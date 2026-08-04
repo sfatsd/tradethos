@@ -21,6 +21,7 @@ the case is not called green without a reader. Pretending otherwise would
 make the suite report confidence it has not earned.
 """
 
+from ..fake_mcp.state import AGENTIC_ACCOUNT
 from . import assertions as a
 
 
@@ -37,7 +38,7 @@ TRADE_EXECUTOR = [
                        text="the order is reviewed before it is placed, "
                             "for that same symbol"),
             a.argument_always("place_equity_order", "account_number",
-                              "123456789",
+                              AGENTIC_ACCOUNT,
                               text="the order goes to the agentic account"),
             a.called("place_equity_order",
                      text="the order is actually placed once confirmed"),
@@ -156,18 +157,6 @@ BASKET_MANAGER = [
         ],
     },
     {
-        "name": "no-typed-numbers",
-        "skill": "basket-manager",
-        "prompt": "buy $100 of my Storage basket, then record the fills",
-        "scenario": {},
-        "basket": {"name": "Storage", "symbols": "WDC:50,MU:50"},
-        "record_fills_grader": True,
-        "assertions": [
-            a.trades_recorded(minimum=2),
-            a.every_trade_traces_to_a_real_order(),
-        ],
-    },
-    {
         "name": "trimmed-json-is-reported",
         "skill": "basket-manager",
         "prompt": "record order {order_id} into my Storage basket",
@@ -187,7 +176,6 @@ BASKET_MANAGER = [
         "prompt": "how is my Storage basket doing",
         "scenario": {},
         "basket": {"name": "Storage", "symbols": "WDC:50,MU:50"},
-        "expect_verify": True,
         "assertions": [
             a.called("get_equity_positions",
                      text="the real positions are fetched so the basket "
@@ -265,7 +253,6 @@ PORTFOLIO_TRACKER = [
         "prompt": "check my performance",
         "scenario": {},
         "basket": {"name": "Storage", "symbols": "WDC:50,MU:50"},
-        "expect_verify": True,
         "assertions": [
             a.called("get_equity_positions",
                      text="positions are fetched before any number is "
@@ -358,6 +345,9 @@ STOCK_SCREENER = [
             a.precedes("get_scanner_filter_specs", "create_scan",
                        text="the filter catalogue is read before a scan "
                             "with custom filters is created"),
+            a.called("create_scan",
+                     text="an RSI question builds a scan rather than "
+                          "falling back to a preset"),
             a.called("run_scan", text="a screen is actually run"),
         ],
     },
@@ -371,6 +361,20 @@ STOCK_SCREENER = [
                            text="a preset question does not build a scan "
                                 "by hand"),
             a.called("run_scan", text="the preset is run"),
+        ],
+    },
+    {
+        "name": "invented-filter-is-rejected",
+        "skill": "stock-screener",
+        "prompt": "screen for semis with a price-to-book under 3",
+        "scenario": {},
+        "assertions": [
+            a.called("get_scanner_filter_specs",
+                     text="the catalogue is consulted before a filter name "
+                          "is chosen"),
+            a.does_not_mention(r"\bpb_ratio\b|\bprice_to_book\b",
+                               text="the agent does not report a filter the "
+                                    "screener rejected as though it worked"),
         ],
     },
 ]

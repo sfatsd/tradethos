@@ -36,11 +36,58 @@ from pathlib import Path
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 # The fake uses these two, so real numbers map onto them and every eval keeps
-# working against a capture from any account.
+# working against a capture from any account. Further accounts get a numbered
+# placeholder: collapsing them all onto one value would make distinct accounts
+# indistinguishable in a capture, which quietly changes what the fixture says.
 AGENTIC_PLACEHOLDER = "123456789"
-NON_AGENTIC_PLACEHOLDER = "9XY87654"
+NON_AGENTIC_PLACEHOLDER = "987654321"
+EXTRA_PLACEHOLDER = "9000000%02d"
 
-ACCOUNT_KEYS = ("account_number", "rhs_account_number", "rhc_account_number")
+# The keys observed in this MCP's payloads today, plus the ones the wider
+# Robinhood API is known to use. None of `account`, `account_id` or `url`
+# appears in the responses captured on 2026-08-03, so they are insurance
+# rather than an observed leak. The final sweep below is what actually makes
+# this safe: an allowlist of key names can only ever cover the shapes someone
+# already thought of, and the point of this file is that one of those guesses
+# was already wrong once.
+ACCOUNT_KEYS = ("account_number", "rhs_account_number", "rhc_account_number",
+                "account", "account_id")
+
+
+def _placeholder_for(index):
+    if index == 0:
+        return AGENTIC_PLACEHOLDER
+    if index == 1:
+        return NON_AGENTIC_PLACEHOLDER
+    return EXTRA_PLACEHOLDER % index
+
+
+def _mask_value(value, mapping):
+    """Map one account value to a stable placeholder.
+
+    A value already seen keeps the placeholder it was given, so the same
+    account reads as the same account across a whole capture. A new one gets
+    the next placeholder rather than sharing the last, because two accounts
+    that collapse onto one value change what the fixture says.
+
+    An account that appears inside a URL is rewritten in place, so
+    `.../accounts/12345/` keeps its shape and loses its number.
+    """
+    if value in mapping:
+        return mapping[value]
+    digits = re.findall(r"\d{6,}", value)
+    if digits and not value.isdigit():
+        replaced = value
+        for found in digits:
+            replaced = replaced.replace(found, _mask_value(found, mapping))
+        mapping[value] = replaced
+        return replaced
+    # The integer key holds the counter. Account values are always strings,
+    # so it cannot collide with one.
+    index = mapping.get(0, 0)
+    mapping[0] = index + 1
+    mapping[value] = _placeholder_for(index)
+    return mapping[value]
 
 
 def mask_accounts(node, mapping):
@@ -54,10 +101,7 @@ def mask_accounts(node, mapping):
         out = {}
         for key, value in node.items():
             if key in ACCOUNT_KEYS and isinstance(value, str):
-                out[key] = mapping.setdefault(
-                    value,
-                    AGENTIC_PLACEHOLDER if len(mapping) == 0
-                    else NON_AGENTIC_PLACEHOLDER)
+                out[key] = _mask_value(value, mapping)
             else:
                 out[key] = mask_accounts(value, mapping)
         return out
@@ -104,6 +148,22 @@ def verify_masked(original, masked):
             "number, so the substitution mapped it to itself. Change the "
             "placeholder before capturing again."
             % (len(survivors), ", ".join(sorted(survivors))))
+
+    # The sweep is the part that does not depend on guessing key names.
+    # Every account value from the input is searched for across the whole
+    # serialized output, so one sitting under a key nobody listed is still
+    # found. An allowlist covers the shapes someone thought of; this covers
+    # the ones they did not.
+    blob = json.dumps(masked)
+    placeholders = set(account_values(masked))
+    leaked = sorted(v for v in account_values(original)
+                    if v not in placeholders and len(v) >= 6 and v in blob)
+    if leaked:
+        raise SystemExit(
+            "A real account value survives elsewhere in the payload: %s\n"
+            "It sits under a key that ACCOUNT_KEYS does not list. Add the "
+            "key, and do not keep the capture until the sweep is clean."
+            % ", ".join(leaked))
 
 
 def capture(tool, payload):

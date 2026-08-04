@@ -99,13 +99,27 @@ gives an exact answer.
 
 ```bash
 python3 -m evals.check_no_real_data            # every tracked file
-python3 -m evals.check_no_real_data --staged   # only what is staged
+python3 -m evals.check_no_real_data --staged   # the staged blobs
 ```
 
-The staged form is the one worth putting in a pre-commit hook, because it asks
-the question while the answer still costs nothing. A checkout with no
-`.private-values` passes trivially, which is correct for a fresh clone and
-avoids training anyone to delete the hook.
+`--staged` reads the blob with `git show :<path>`, not the file on disk. The
+first version took the names from `git diff --cached` and then opened those
+paths, which is the wrong content: a secret can be staged and then edited out
+of the working tree, and the scan would read the clean copy and report clean
+while the index still held it. The two sources usually agree, which is what
+made the bug quiet enough to ship.
+
+A git failure exits 2, never 0. The same first version discarded git's exit
+code, so running outside a repository produced an empty file list and a
+confident "clean". A guard whose failure mode is silent success has the one
+failure mode it cannot have.
+
+Values shorter than five characters are rejected rather than matched, and
+matching respects word boundaries, so `590.05` on the list does not fire on
+`1590.055`. A guard that cries wolf is a guard people learn to skip.
+
+A checkout with no `.private-values` passes trivially, which is correct for a
+fresh clone and avoids training anyone to delete the hook.
 
 Neither guard covers the case that caused the trouble here: a real value typed
 straight into source, which never passes through the masker. That is what the

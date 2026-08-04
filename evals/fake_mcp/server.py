@@ -180,6 +180,19 @@ class Server(object):
             arguments = params.get("arguments") or {}
             try:
                 payload = self.call_tool(name, arguments)
+            except TypeError as error:
+                # A wrong or missing argument is an agent mistake, and the
+                # real server answers it with an error rather than dropping
+                # the connection. Letting it propagate would kill the run
+                # and make an agent failure read as infrastructure failure,
+                # which is the most expensive kind of wrong result: it
+                # discredits the eval instead of the agent.
+                return self._ok(request_id, {
+                    "content": [{"type": "text",
+                                 "text": json.dumps(
+                                     {"error": "Bad arguments for %s: %s"
+                                               % (name, error)})}],
+                    "isError": True})
             except broker_state.TransportError as error:
                 # Surfaced as a protocol error, not a tool result. A retry
                 # is the correct response, and the agent should reuse its
