@@ -81,6 +81,11 @@ The examples below use `$SCRIPTS` for that directory, and `$BASKET` for
 Every command defaults to the real store at `~/.tradethos`. **Do not pass `--data-dir`** in
 normal use. Pass `--data-dir` only inside a test, pointed at a temporary directory.
 
+A test harness can also redirect the store by setting `TRADETHOS_DATA_DIR` in the environment.
+That is not something to do or to think about: it moves the store without changing any
+command, so the commands above stay correct either way. It is mentioned only so that a
+store in an unfamiliar place does not look like a fault.
+
 Every command prints JSON on stdout by default. Pass `--format table` for a short
 human-readable view; `list` supports it, and every command still accepts it (most commands,
 including `history`, fall back to JSON when they have no table view of their own).
