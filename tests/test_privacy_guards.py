@@ -132,8 +132,6 @@ class ScannerTest(unittest.TestCase):
                          result.stdout + result.stderr)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 class StagedBlobTest(unittest.TestCase):
     """The bug that made the pre-commit use case useless.
@@ -262,6 +260,75 @@ class MaskingBreadthTest(unittest.TestCase):
             cf.verify_masked(payload, masked)
         self.assertIn("998877665", str(caught.exception))
 
+
+
+
+class StoreRedirectTest(unittest.TestCase):
+    """The eval must not be able to reach the user's real ledger.
+
+    The skill tells the agent never to pass `--data-dir`, so an eval cannot
+    redirect the store by instructing the agent without changing the command
+    it is measuring. The environment variable moves the store instead, and
+    the agent runs exactly what the skill documents.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.dir = Path(self.tmp.name)
+        self.cli = ROOT / "skills" / "basket-manager" / "scripts" / "basket.py"
+
+    def run_cli(self, *args, **kwargs):
+        env = dict(os.environ)
+        env.pop("TRADETHOS_DATA_DIR", None)
+        env.update(kwargs.get("env") or {})
+        return subprocess.run([sys.executable, str(self.cli)] + list(args),
+                              capture_output=True, text=True, env=env)
+
+    def test_the_env_var_redirects_the_store(self):
+        result = self.run_cli("create", "Probe", "--symbols", "WDC:100",
+                              "--account", "123456789",
+                              env={"TRADETHOS_DATA_DIR": str(self.dir)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.dir / "events.log.jsonl").exists(),
+                        "the store did not land in the redirected directory")
+
+    def test_an_explicit_data_dir_still_wins(self):
+        other = self.dir / "explicit"
+        other.mkdir()
+        result = self.run_cli("--data-dir", str(other), "create", "Probe",
+                              "--symbols", "WDC:100", "--account", "123456789",
+                              env={"TRADETHOS_DATA_DIR": str(self.dir)})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((other / "events.log.jsonl").exists())
+        self.assertFalse((self.dir / "events.log.jsonl").exists())
+
+    def test_the_real_store_is_untouched_by_a_redirected_write(self):
+        from evals.run_case import fingerprint, REAL_STORE
+        before = fingerprint(REAL_STORE)
+        self.run_cli("create", "Probe", "--symbols", "WDC:100",
+                     "--account", "123456789",
+                     env={"TRADETHOS_DATA_DIR": str(self.dir)})
+        self.assertEqual(fingerprint(REAL_STORE), before,
+                         "a redirected write reached the real ledger")
+
+    def test_the_tripwire_notices_a_change(self):
+        # The tripwire is only worth having if it can fail. A guard that
+        # cannot detect the thing it guards against is decoration.
+        from evals.run_case import fingerprint
+        watched = self.dir / "watched"
+        watched.mkdir()
+        (watched / "a.jsonl").write_text("one\n")
+        before = fingerprint(watched)
+        (watched / "a.jsonl").write_text("one\ntwo\n")
+        self.assertNotEqual(fingerprint(watched), before)
+
+    def test_the_tripwire_is_quiet_when_nothing_changes(self):
+        from evals.run_case import fingerprint
+        watched = self.dir / "steady"
+        watched.mkdir()
+        (watched / "a.jsonl").write_text("one\n")
+        self.assertEqual(fingerprint(watched), fingerprint(watched))
 
 if __name__ == "__main__":
     unittest.main()

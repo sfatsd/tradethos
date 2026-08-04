@@ -27,6 +27,7 @@ Usage:
 """
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -39,6 +40,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from evals import responses as eval_responses            # noqa: E402
 from evals.graders import cases as case_registry          # noqa: E402
 from evals.graders.transcript import (                    # noqa: E402
     RunArtifacts, Transcript)
@@ -50,12 +52,38 @@ from evals.graders.check_record_fills import (            # noqa: E402
 SERVER_ID = "1975086b-2b49-4b1b-b657-097b3b1d7a24"
 BASKET_CLI = ROOT / "skills" / "basket-manager" / "scripts" / "basket.py"
 
+# The user's real ledger. Nothing in an eval may touch it.
+REAL_STORE = Path.home() / ".tradethos"
 
-def write_mcp_config(directory, transcript, seed):
-    """Write an MCP config that starts the fake and logs every call."""
-    args = ["-m", "evals.fake_mcp.server", "--transcript", str(transcript)]
-    if seed:
-        args += ["--seed", str(seed)]
+
+def fingerprint(path):
+    """Hash every file under a directory, or None when it is absent.
+
+    `TRADETHOS_DATA_DIR` is what redirects the store, and it works. This
+    checks the claim anyway, per run, because "the writes went somewhere
+    else" is a belief until something compares the before and the after.
+    An eval that quietly appended to the real basket ledger would look
+    exactly like a passing eval.
+    """
+    if not path.exists():
+        return None
+    digest = hashlib.sha256()
+    for item in sorted(path.rglob("*")):
+        if item.is_file():
+            digest.update(str(item.relative_to(path)).encode())
+            digest.update(item.read_bytes())
+    return digest.hexdigest()
+
+
+def write_mcp_config(directory, transcript, responses):
+    """Write an MCP config that starts the recorder and logs every request.
+
+    The recorder decides nothing. It hands back canned responses and writes
+    every request to `transcript`, which is what the assertions read.
+    """
+    args = ["-m", "evals.fake_mcp.recorder",
+            "--requests", str(transcript),
+            "--responses", str(responses)]
     config = {"mcpServers": {SERVER_ID: {
         "command": sys.executable, "args": args,
         "env": {"PYTHONPATH": str(ROOT)}}}}
@@ -64,11 +92,9 @@ def write_mcp_config(directory, transcript, seed):
     return path
 
 
-def write_seed(directory, scenario):
-    if not scenario:
-        return None
-    path = directory / "seed.json"
-    path.write_text(json.dumps(scenario))
+def write_responses(directory, case):
+    path = directory / "responses.json"
+    eval_responses.write(case, path)
     return path
 
 
@@ -96,8 +122,8 @@ def run(case, timeout=300, model=None, verbose=False):
     data_dir.mkdir()
 
     slugs = prepare_basket(data_dir, case)
-    seed = write_seed(workspace, case.get("scenario"))
-    config = write_mcp_config(workspace, transcript, seed)
+    responses = write_responses(workspace, case)
+    config = write_mcp_config(workspace, transcript, responses)
 
     # `--strict-mcp-config` is the isolation: the agent gets only the servers
     # named here, so the live brokerage is absent rather than merely
@@ -117,10 +143,15 @@ def run(case, timeout=300, model=None, verbose=False):
     if model:
         command += ["--model", model]
 
+    before = fingerprint(REAL_STORE)
     started = time.time()
     try:
         result = subprocess.run(command, capture_output=True, text=True,
                                 timeout=timeout, cwd=str(workspace),
+                                # basket.py reads this instead of ~/.tradethos.
+                                # The agent runs the command the skill
+                                # documents, with no --data-dir, and the
+                                # writes land in a disposable directory.
                                 env=dict(os.environ,
                                          TRADETHOS_DATA_DIR=str(data_dir)))
         final_message, failure = result.stdout, None
@@ -128,12 +159,19 @@ def run(case, timeout=300, model=None, verbose=False):
         final_message, failure = "", "timed out after %ds" % timeout
     elapsed = time.time() - started
 
+    if fingerprint(REAL_STORE) != before:
+        failure = ("THE RUN MODIFIED THE REAL STORE AT %s. Stop and inspect "
+                   "it before running anything else." % REAL_STORE)
+
     artifacts = RunArtifacts(
         transcript=Transcript.from_file(transcript),
         events=_load_events(data_dir / "events.log.jsonl"),
         final_message=final_message,
         slug=slugs[0] if slugs else None)
-    artifacts.orders_by_id = _orders_from_transcript(artifacts.transcript)
+    # The orders come from the canned responses, not from anything the run
+    # worked out. The grader needs a fixed target to compare the ledger
+    # against, and a value invented during the run could not be one.
+    artifacts.orders_by_id = eval_responses.expected_orders(case)
     artifacts.expected_order_ids = sorted(artifacts.orders_by_id)
 
     results = [check(artifacts) for check in case["assertions"]]
@@ -162,21 +200,6 @@ def _load_events(path):
         return []
     return [json.loads(line) for line in path.read_text().splitlines()
             if line.strip()]
-
-
-def _orders_from_transcript(transcript):
-    """Recover the broker's orders from what it was asked and answered.
-
-    The grader needs the broker's own record of each fill. The fake writes
-    only the calls, so the ids come from the place calls the agent made.
-    """
-    orders = {}
-    for call in transcript.calls:
-        if call.get("tool") == "place_equity_order":
-            order = (call.get("result") or {})
-            if order:
-                orders[order.get("id")] = order
-    return orders
 
 
 def main(argv=None):

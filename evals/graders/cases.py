@@ -179,7 +179,8 @@ BASKET_MANAGER = [
     {
         "name": "raw-response-to-record-fills",
         "skill": "basket-manager",
-        "prompt": "buy $100 of my Storage basket, then record the fills",
+        "prompt": "buy $100 of my Storage basket, then record the fills. "
+                  "I confirm, place them.",
         "scenario": {},
         "basket": {"name": "Storage", "symbols": "WDC:50,MU:50"},
         "record_fills_grader": True,
