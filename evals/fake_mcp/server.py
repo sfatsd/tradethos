@@ -154,12 +154,28 @@ class Server(object):
         if name not in TOOL_NAMES:
             raise broker_state.BrokerError("Unknown tool %s" % name)
         self.broker.record_call(name, arguments)
-        self._log({"tool": name, "arguments": arguments})
         handler = getattr(self.broker, name, None)
         if handler is None:
             raise broker_state.BrokerError(
                 "Tool %s is declared but not implemented" % name)
-        return handler(**arguments)
+
+        entry = {"tool": name, "arguments": arguments}
+        try:
+            result = handler(**arguments)
+        except Exception as error:
+            # A refused call is still a call. Dropping it would hide the
+            # attempt from every ordering assertion, and "did the agent try
+            # to place this?" is exactly what several cases ask.
+            entry["error"] = str(error)
+            self._log(entry)
+            raise
+        if name == "place_equity_order":
+            # The grader compares the ledger against what the broker
+            # actually filled, so the order has to survive in the record
+            # the grader reads rather than only in the agent's reply.
+            entry["result"] = (result.get("data") or {}).get("order")
+        self._log(entry)
+        return result
 
     def handle(self, request):
         method = request.get("method")

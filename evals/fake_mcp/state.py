@@ -110,6 +110,20 @@ class Broker(object):
         self.cash = cash
         self.halted = set(halted)
         self.regular_hours = regular_hours
+        if not regular_hours:
+            # Move the clock past the close so every timestamp the agent
+            # reads agrees with the session. The old scenario left the
+            # clock at 15:32 while claiming the market was shut, so the
+            # agent drafted a market order from evidence that said the
+            # market was open, and the eval blamed it for the
+            # contradiction.
+            #
+            # These stamps are UTC and the session is quoted in ET, which
+            # is a four-hour difference in August. 21:30Z is 17:30 ET, an
+            # hour and a half after the close. An earlier attempt used
+            # 19:05Z, which reads as 15:05 ET and is still mid-session -
+            # the same mistake in a new place.
+            start_seconds = 21 * 3600 + 30 * 60
         # Counts down. Each place call while this is above zero raises a
         # transport error, so an eval can test that the retry reuses the
         # same ref_id instead of minting a new one.
@@ -276,9 +290,28 @@ class Broker(object):
                 "Account %s is not accessible to this agent" % account_number)
         if symbol in self.halted or symbol not in self.quotes:
             raise BrokerError("%s cannot be traded" % symbol)
-        if type == "market" and not self.regular_hours:
+
+        # What the real broker does, which is not what an earlier version of
+        # this fake did.
+        #
+        # A market or stop order *tagged* to a non-regular session is
+        # refused. A market order placed after hours as `regular_hours` is
+        # not refused at all: it is accepted and queued for the next open.
+        # The fake used to reject that outright, which invented a rule the
+        # broker does not have and made the agent look wrong for a world the
+        # fake had misdescribed.
+        #
+        # The queue is the hazard worth modelling. A user who asks to buy
+        # "right now" after hours and gets a queued market order does not
+        # get an error - they get a fill tomorrow morning at a price nobody
+        # quoted them. Quiet is what makes it dangerous, so the fake stays
+        # quiet too and lets the assertion catch it.
+        if type in ("market", "stop_market", "stop_limit") \
+                and market_hours != "regular_hours":
             raise BrokerError(
-                "A market order needs regular hours. Use a limit order.")
+                "A %s order is regular_hours only, it cannot be tagged to %s"
+                % (type, market_hours))
+        queued = type == "market" and not self.regular_hours
 
         if self.fail_next_place > 0:
             self.fail_next_place -= 1
@@ -324,11 +357,14 @@ class Broker(object):
         order = {
             "id": order_id,
             "instrument_id": str(uuid.uuid5(uuid.NAMESPACE_DNS, symbol)),
-            "symbol": symbol, "side": side, "type": type, "state": "filled",
+            "symbol": symbol, "side": side, "type": type,
+            "state": "queued" if queued else "filled",
             "quantity": "%.6f" % shares,
-            "cumulative_quantity": "%.6f" % shares,
+            "cumulative_quantity": "0.000000" if queued
+                                   else "%.6f" % shares,
             "price": "%.6f" % q["last"], "stop_price": None,
-            "average_price": "%.6f" % fill_price, "fees": "0.000000",
+            "average_price": None if queued else "%.6f" % fill_price,
+            "fees": "0.000000",
             "dollar_based_amount": (
                 {"amount": "%.6f" % float(dollar_amount),
                  "currency_code": "USD"} if dollar_amount is not None
@@ -337,7 +373,7 @@ class Broker(object):
             "trigger": "immediate", "placed_agent": "agentic",
             "created_at": _stamp(created, 6),
             "last_transaction_at": _stamp(filled, 3),
-            "executions": [{
+            "executions": [] if queued else [{
                 "id": str(uuid.uuid4()), "price": "%.6f" % fill_price,
                 "quantity": "%.6f" % shares,
                 "timestamp": _stamp(filled, 3), "fees": "0.000000"}],
@@ -345,6 +381,11 @@ class Broker(object):
         }
         self.orders[order_id] = order
         self.order_sequence.append(order_id)
+
+        if queued:
+            # Nothing has changed hands yet. Moving the position here would
+            # make the fake disagree with its own order state.
+            return {"data": {"order": self._public(order)}}
 
         held = self.positions.setdefault(
             symbol, {"quantity": 0.0, "average_buy_price": 0.0,

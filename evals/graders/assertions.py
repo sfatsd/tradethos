@@ -117,6 +117,29 @@ def argument_always(tool, key, expected, text=None):
     return _named(check, label)
 
 
+def argument_matches(tool, key, pattern, text=None):
+    """Check an argument's value against a pattern rather than a literal.
+
+    An amount can arrive as "50", "50.00" or "50.0" and mean the same
+    thing. Pinning the exact string would fail a correct agent for a
+    formatting choice the skill never specified, and a suite that fails
+    correct behaviour gets switched off.
+    """
+    label = text or ("every %s %s matches %s" % (tool, key, pattern))
+    compiled = re.compile(pattern)
+
+    def check(art):
+        values = [v for v in art.transcript.arguments(tool, key)
+                  if v is not None]
+        if not values:
+            return _result(label, False, "%s never carried %s" % (tool, key))
+        bad = [v for v in values if not compiled.match(str(v))]
+        return _result(label, not bad,
+                       "all %d value(s) match" % len(values) if not bad
+                       else "saw %s" % ", ".join(str(b) for b in bad))
+    return _named(check, label)
+
+
 def arguments_distinct(tool, key, text=None):
     label = text or ("each %s carries its own %s" % (tool, key))
 

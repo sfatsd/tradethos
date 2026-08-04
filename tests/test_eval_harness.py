@@ -194,12 +194,37 @@ class HarnessTestCase(unittest.TestCase):
                 "symbol": "WDC", "side": "buy", "type": "market",
                 "dollar_amount": "20.00"})
 
-    def test_a_market_order_is_refused_outside_regular_hours(self):
-        self.broker.regular_hours = False
+    def test_a_market_order_after_hours_queues_rather_than_failing(self):
+        # This test used to assert a refusal, which was a rule the real
+        # broker does not have. The documented behaviour is that a market
+        # order placed after hours as regular_hours is accepted and queued
+        # for the next open. The queue is the hazard: a user who asked to
+        # buy "right now" gets no error, and a fill tomorrow at a price
+        # nobody quoted them.
+        broker = broker_state.Broker(regular_hours=False)
+        order = broker.place_equity_order(
+            ACCOUNT, "WDC", "buy", "market",
+            dollar_amount="20.00")["data"]["order"]
+        self.assertEqual(order["state"], "queued")
+        self.assertEqual(float(order["cumulative_quantity"]), 0.0)
+        self.assertIsNone(order["average_price"])
+        self.assertEqual(order["executions"], [])
+        self.assertNotIn("WDC", [s for s, h in broker.positions.items()
+                                 if h["quantity"] > 0.05])
+
+    def test_a_market_order_tagged_to_another_session_is_refused(self):
         with self.assertRaises(broker_state.BrokerError):
             self.server.call_tool("place_equity_order", {
                 "account_number": ACCOUNT, "symbol": "WDC", "side": "buy",
-                "type": "market", "dollar_amount": "20.00"})
+                "type": "market", "dollar_amount": "20.00",
+                "market_hours": "extended_hours"})
+
+    def test_a_limit_order_fills_in_extended_hours(self):
+        broker = broker_state.Broker(regular_hours=False)
+        order = broker.place_equity_order(
+            ACCOUNT, "WDC", "buy", "limit", quantity="1",
+            market_hours="extended_hours")["data"]["order"]
+        self.assertEqual(order["state"], "filled")
 
     def test_an_undeclared_tool_name_is_refused(self):
         # Dispatch used to read the name straight off the broker, so any
