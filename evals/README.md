@@ -79,6 +79,38 @@ are synthetic.
 Re-capture before a release and read the diff. A change in the shape of a
 response is worth knowing about, so do not overwrite one without looking.
 
+## Keeping real data out
+
+Two guards, each for a failure that already happened once.
+
+**`capture_fixtures.py` verifies its own masking.** The first time it ran, the
+placeholder held a real account number, so the substitution mapped that number
+to itself. The capture was masked in form and unmasked in fact, and nothing in
+the run said so. `verify_masked` compares the account values before and after
+and refuses to write a file when none of them changed.
+
+**`check_no_real_data.py` scans tracked files against a private list.** A
+repository cannot carry the list of values it must never contain, so the list
+lives in `.private-values`, which is git-ignored. That inverts the usual
+approach: a pattern-based scanner has to guess what a real account number
+looks like, and it either misses the ordinary-looking ones or drowns in false
+positives from test fixtures. Matching against values already known to be real
+gives an exact answer.
+
+```bash
+python3 -m evals.check_no_real_data            # every tracked file
+python3 -m evals.check_no_real_data --staged   # only what is staged
+```
+
+The staged form is the one worth putting in a pre-commit hook, because it asks
+the question while the answer still costs nothing. A checkout with no
+`.private-values` passes trivially, which is correct for a fresh clone and
+avoids training anyone to delete the hook.
+
+Neither guard covers the case that caused the trouble here: a real value typed
+straight into source, which never passes through the masker. That is what the
+scanner is for, and it only works if the list is kept current.
+
 ## What is not built yet
 
 The agent-in-the-loop runs. Each eval needs a subagent with the skill and a

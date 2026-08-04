@@ -66,9 +66,50 @@ def mask_accounts(node, mapping):
     return node
 
 
+def account_values(node, found=None):
+    """Collect every value stored under an account key."""
+    if found is None:
+        found = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key in ACCOUNT_KEYS and isinstance(value, str):
+                found.add(value)
+            else:
+                account_values(value, found)
+    elif isinstance(node, list):
+        for item in node:
+            account_values(item, found)
+    return found
+
+
+def verify_masked(original, masked):
+    """Fail when a real account number survived the substitution.
+
+    Masking is only ever as good as the placeholder it substitutes in. The
+    first time this script ran, `AGENTIC_PLACEHOLDER` happened to hold a
+    real account number, so the substitution mapped that number to itself.
+    The capture was masked in form and unmasked in fact, and nothing said
+    so: the code did exactly what it claimed and the output was still
+    wrong.
+
+    Comparing the values before and after is what catches that. It also
+    catches any future placeholder that collides with real data, which is
+    the same bug wearing different digits.
+    """
+    survivors = account_values(original) & account_values(masked)
+    if survivors:
+        raise SystemExit(
+            "Masking did not change %d account value(s): %s\n"
+            "A placeholder in capture_fixtures.py matches a real account "
+            "number, so the substitution mapped it to itself. Change the "
+            "placeholder before capturing again."
+            % (len(survivors), ", ".join(sorted(survivors))))
+
+
 def capture(tool, payload):
     FIXTURES.mkdir(parents=True, exist_ok=True)
     masked = mask_accounts(payload, {})
+    verify_masked(payload, masked)
     path = FIXTURES / ("%s.json" % tool)
     if path.exists():
         print("note: %s already exists. Read the diff before you keep it."

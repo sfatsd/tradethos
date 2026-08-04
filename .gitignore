@@ -8,6 +8,11 @@ data/baskets/*.json
 # so a capture stays on the machine that made it.
 evals/fixtures/*.json
 
+# The list of values that must never reach a tracked file. It is ignored for
+# the obvious reason: a repository cannot carry the list of things it must
+# not contain. See evals/check_no_real_data.py.
+.private-values
+
 # Python cache
 __pycache__/
 *.pyc
