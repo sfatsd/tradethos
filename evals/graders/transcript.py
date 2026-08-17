@@ -87,7 +87,7 @@ class RunArtifacts(object):
 
     def __init__(self, transcript=None, events=None, final_message="",
                  orders_by_id=None, expected_order_ids=None, slug=None,
-                 broker=None):
+                 broker=None, baseline_order_ids=None):
         self.transcript = transcript or Transcript()
         self.events = events or []
         self.final_message = final_message or ""
@@ -95,6 +95,11 @@ class RunArtifacts(object):
         self.expected_order_ids = list(expected_order_ids or [])
         self.slug = slug
         self.broker = broker
+        # Trades the harness wrote before the agent started. A case that
+        # pre-claims an order to set up a conflict would otherwise count
+        # its own setup against the agent, which is what happened: a run
+        # behaved correctly and failed on a ledger entry it never made.
+        self.baseline_order_ids = set(baseline_order_ids or ())
 
     @classmethod
     def from_directory(cls, path, slug=None, expected_order_ids=None):
@@ -131,7 +136,11 @@ class RunArtifacts(object):
                 or sorted(orders_by_id.keys()),
             slug=slug)
 
-    def trades(self):
-        return [e for e in self.events
+    def trades(self, include_baseline=False):
+        rows = [e for e in self.events
                 if e.get("type") in ("buy", "sell")
                 and (self.slug is None or e.get("slug") == self.slug)]
+        if include_baseline:
+            return rows
+        return [e for e in rows
+                if e.get("order_id") not in self.baseline_order_ids]

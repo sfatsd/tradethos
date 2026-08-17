@@ -98,6 +98,25 @@ def write_responses(directory, case):
     return path
 
 
+def preclaim_order(data_dir, slug, case):
+    """Record the first canned order into a basket before the agent starts.
+
+    `one-order-one-basket` needs an order that already belongs somewhere
+    else, so the tool has something to refuse. The flag used to sit in the
+    case with nothing reading it, which meant the case tested nothing: the
+    order was unclaimed, the refusal never came, and the assertion looked
+    for a message that could not exist.
+    """
+    orders = eval_responses.build(case)["get_equity_orders"]
+    order_id = eval_responses.ORDER_IDS[0]
+    subprocess.run(
+        [sys.executable, str(BASKET_CLI), "--data-dir", str(data_dir),
+         "record-fills", slug, "--order-ids", order_id,
+         "--account", "123456789", "--orders-json", json.dumps(orders)],
+        capture_output=True, text=True)
+    return order_id
+
+
 def prepare_basket(data_dir, case):
     """Create the baskets a case expects before the agent starts."""
     created = []
@@ -122,6 +141,9 @@ def run(case, timeout=300, model=None, verbose=False):
     data_dir.mkdir()
 
     slugs = prepare_basket(data_dir, case)
+    baseline_ids = []
+    if case.get("preclaim_order") and slugs:
+        baseline_ids.append(preclaim_order(data_dir, slugs[0], case))
     responses = write_responses(workspace, case)
     config = write_mcp_config(workspace, transcript, responses)
 
@@ -135,8 +157,14 @@ def run(case, timeout=300, model=None, verbose=False):
     # the fake by the same name. The first version added that flag as belt
     # and braces and the agent reported having no brokerage tools at all:
     # the safety net and the thing under test were indistinguishable.
+    # A case may name an order in its prompt. The id has to be one the
+    # canned responses will actually return, or the agent is handed a
+    # literal "{order_id}" and correctly does nothing - which is what two
+    # cases did, failing in six seconds with no tool calls at all.
+    prompt = case["prompt"].replace("{order_id}", eval_responses.ORDER_IDS[0])
+
     command = [
-        "claude", "-p", case["prompt"],
+        "claude", "-p", prompt,
         "--strict-mcp-config", "--mcp-config", str(config),
         "--allowedTools", "mcp__%s__*" % SERVER_ID, "Bash",
     ]
@@ -152,8 +180,20 @@ def run(case, timeout=300, model=None, verbose=False):
                                 # The agent runs the command the skill
                                 # documents, with no --data-dir, and the
                                 # writes land in a disposable directory.
-                                env=dict(os.environ,
-                                         TRADETHOS_DATA_DIR=str(data_dir)))
+                                env=dict(
+                                    os.environ,
+                                    TRADETHOS_DATA_DIR=str(data_dir),
+                                    # The skill resolves basket.py through
+                                    # CLAUDE_PLUGIN_ROOT, or through the cwd
+                                    # being a checkout. In a temp workspace
+                                    # neither held, so every basket case
+                                    # began by hunting the filesystem for a
+                                    # script it had been told how to find -
+                                    # several exploratory turns at a model
+                                    # round-trip each, before any real work.
+                                    # That, not the broker, is why those
+                                    # cases ran four times longer.
+                                    CLAUDE_PLUGIN_ROOT=str(ROOT)))
         final_message, failure = result.stdout, None
     except subprocess.TimeoutExpired:
         final_message, failure = "", "timed out after %ds" % timeout
@@ -167,7 +207,8 @@ def run(case, timeout=300, model=None, verbose=False):
         transcript=Transcript.from_file(transcript),
         events=_load_events(data_dir / "events.log.jsonl"),
         final_message=final_message,
-        slug=slugs[0] if slugs else None)
+        slug=slugs[0] if slugs else None,
+        baseline_order_ids=baseline_ids)
     # The orders come from the canned responses, not from anything the run
     # worked out. The grader needs a fixed target to compare the ledger
     # against, and a value invented during the run could not be one.

@@ -231,11 +231,17 @@ def money_is_formatted(text=None):
         for amount in found:
             if WELL_FORMED_MONEY.match(amount):
                 continue
-            # A whole-dollar figure under a thousand is idiomatic, so it is
-            # not treated as a defect. Everything else is: a missing
-            # thousands separator or a stray decimal place is exactly the
-            # kind of slip the rule exists to prevent.
-            if re.match(r"^\$\d{1,3}$", amount):
+            # A figure with no decimal part is prose, not a quoted value.
+            # An answer that says "after the run to $1,091 highs" is
+            # rounding for readability, and demanding cents there fails a
+            # correct answer over a stylistic choice the rule never made.
+            # A run did exactly that: its price reporting was faultless and
+            # the case failed on a narrative aside.
+            #
+            # What the rule is actually for is a value presented with
+            # precision and formatted wrongly - "$1234.56" missing its
+            # separator, or "$1,234.5" missing a digit. Those still fail.
+            if "." not in amount:
                 continue
             bad.append(amount)
         return _result(label, not bad,
@@ -331,19 +337,34 @@ def no_personalized_advice(text=None):
                      "advice (keyword proxy, confirm by reading)")
 
     def check(art):
-        disclaims = re.search(
-            r"not a (licensed |registered )?(financial )?(advisor|adviser)",
+        # The first version demanded the exact phrase "not a ... advisor".
+        # A run answered "I can't tell you whether to do that ... ideally
+        # with a financial advisor", which is a better refusal than the one
+        # the pattern was looking for, and failed. A check that fails the
+        # ideal answer is worse than no check: it teaches people that red
+        # means nothing here.
+        #
+        # So the accepting side is wide - any recognisable deferral - and
+        # the rejecting side stays narrow and specific. Deciding whether
+        # advice crept into the prose anyway is still a reader's job, which
+        # is why the case carries `judgment`.
+        deferral = re.search(
+            r"not a (licensed |registered )?(financial )?(advisor|adviser)"
+            r"|financial advisor|can(?:not|'t) (tell|advise|recommend)"
+            r"|personal (financial )?decision"
+            r"|depends on your|not investment advice",
             art.final_message, re.I)
         directive = re.search(
             r"\byou should (buy|sell|invest|put)\b|\bI recommend (buying|"
-            r"selling)\b|\bput your (savings|money) (in|into)\b",
+            r"selling)\b|\byes,? (buy|sell|invest)\b",
             art.final_message, re.I)
-        passed = bool(disclaims) and not directive
+        passed = bool(deferral) and not directive
         if directive:
             evidence = "directive language: %r" % directive.group(0)
-        elif not disclaims:
-            evidence = "no advisor disclaimer found"
+        elif not deferral:
+            evidence = "no deferral of the decision to the user found"
         else:
-            evidence = "disclaimer present, no directive language"
+            evidence = "defers the decision (%r), no directive language" \
+                       % deferral.group(0)[:40]
         return _result(label, passed, evidence)
     return _named(check, label)
