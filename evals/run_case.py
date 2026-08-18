@@ -98,6 +98,30 @@ def write_responses(directory, case):
     return path
 
 
+def _parse_output(stdout):
+    """Split the agent's answer from the run metrics.
+
+    `--output-format json` wraps the answer in a report carrying turns,
+    API time and cost. Falling back to the raw text keeps the runner
+    working if that format ever changes, because losing the metrics should
+    degrade the report rather than break the run.
+    """
+    try:
+        payload = json.loads(stdout)
+    except ValueError:
+        return stdout, {}
+    if not isinstance(payload, dict):
+        return stdout, {}
+    usage = payload.get("usage") or {}
+    return payload.get("result", ""), {
+        "turns": payload.get("num_turns"),
+        "api_seconds": round((payload.get("duration_api_ms") or 0) / 1000, 1),
+        "cost_usd": round(payload.get("total_cost_usd") or 0, 4),
+        "output_tokens": usage.get("output_tokens"),
+        "cache_read_tokens": usage.get("cache_read_input_tokens"),
+    }
+
+
 def preclaim_order(data_dir, slug, case):
     """Record the first canned order into a basket before the agent starts.
 
@@ -167,6 +191,12 @@ def run(case, timeout=300, model=None, verbose=False):
         "claude", "-p", prompt,
         "--strict-mcp-config", "--mcp-config", str(config),
         "--allowedTools", "mcp__%s__*" % SERVER_ID, "Bash",
+        # Structured output carries turn count, API time and cost. Wall
+        # clock alone made the slow cases a mystery for most of a day: a
+        # case with three MCP calls took eighty seconds, and the missing
+        # arithmetic was fifteen Bash and reasoning turns that nothing was
+        # counting. Turns are the unit an eval is actually billed in.
+        "--output-format", "json",
     ]
     if model:
         command += ["--model", model]
@@ -194,9 +224,11 @@ def run(case, timeout=300, model=None, verbose=False):
                                     # That, not the broker, is why those
                                     # cases ran four times longer.
                                     CLAUDE_PLUGIN_ROOT=str(ROOT)))
-        final_message, failure = result.stdout, None
+        final_message, metrics = _parse_output(result.stdout)
+        failure = None
     except subprocess.TimeoutExpired:
-        final_message, failure = "", "timed out after %ds" % timeout
+        final_message, metrics = "", {}
+        failure = "timed out after %ds" % timeout
     elapsed = time.time() - started
 
     if fingerprint(REAL_STORE) != before:
@@ -227,6 +259,7 @@ def run(case, timeout=300, model=None, verbose=False):
             "failure": failure, "seconds": round(elapsed, 1),
             "tool_calls": len(artifacts.transcript),
             "tools_used": artifacts.transcript.tools(),
+            "metrics": metrics,
             # Kept for diagnosis. A run with no tool calls is ambiguous
             # until you read what the agent said: it may have refused, or
             # asked a question, or found no tools at all - and those are
@@ -272,9 +305,11 @@ def main(argv=None):
         report = run(case, timeout=args.timeout, model=args.model)
         reports.append(report)
         mark = "PASS" if report["passed"] else "FAIL"
-        print("%-5s %-32s %5.1fs  %2d tool calls"
+        m = report.get("metrics") or {}
+        print("%-5s %-32s %5.1fs %3s turns %2d mcp  $%.3f"
               % (mark, report["case"], report["seconds"],
-                 report["tool_calls"]))
+                 m.get("turns", "?"), report["tool_calls"],
+                 m.get("cost_usd") or 0))
         for expectation in report["expectations"]:
             if not expectation["passed"]:
                 print("        %s" % expectation["text"])
@@ -287,7 +322,11 @@ def main(argv=None):
     if args.out:
         Path(args.out).write_text(json.dumps(reports, indent=2))
     passed = sum(1 for r in reports if r["passed"])
-    print("\n%d/%d cases passed" % (passed, len(reports)))
+    turns = sum((r.get("metrics") or {}).get("turns") or 0 for r in reports)
+    cost = sum((r.get("metrics") or {}).get("cost_usd") or 0 for r in reports)
+    seconds = sum(r["seconds"] for r in reports)
+    print("\n%d/%d cases passed | %d turns | %.0fs | $%.2f"
+          % (passed, len(reports), turns, seconds, cost))
     return 0 if passed == len(reports) else 1
 
 

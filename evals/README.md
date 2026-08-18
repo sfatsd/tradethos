@@ -131,3 +131,27 @@ The agent-in-the-loop runs. Each eval needs a subagent with the skill and a
 second one without it, for a baseline. See
 `docs/superpowers/plans/2026-08-03-skill-evaluation-suite.md` for the eval
 cases, the per-skill assertions and the phases.
+
+## What a run costs
+
+Each case is a full agent session, so the unit that matters is turns, not
+tool calls. A case with three MCP calls took eighty seconds and the
+arithmetic did not work until the runner started counting turns: the missing
+time was fifteen Bash and reasoning round-trips that nothing was recording.
+
+`--output-format json` gives turns, API time and cost, and `run_case` reports
+them per case and as a total:
+
+```
+PASS  verify-on-report                  78.9s  18 turns  3 mcp  $0.366
+```
+
+Rough shape at the time of writing: a basket case is 15-20 turns and about
+$0.35, a trade case 4-9 turns and about $0.15. The whole suite is roughly 25
+minutes and $6 for one sample of each case.
+
+That settles where each layer belongs. The programmatic tests in `tests/` run
+in about twenty seconds and cost nothing, so they are the per-commit gate.
+The agent-in-the-loop suite is a pre-release check. Three samples per case,
+which is what the plan asks for and what the variance seen so far justifies,
+is around 75 minutes and $18 - worth doing deliberately, not on every push.
