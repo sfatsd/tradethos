@@ -15,22 +15,36 @@ This harness tests that layer.
 
 | Path | Purpose |
 |---|---|
-| `fake_mcp/state.py` | A brokerage that holds state and moves no money |
-| `fake_mcp/server.py` | An MCP server over stdio, with the real tool names |
+| `run_case.py` | Runs one case in an isolated agent and grades it |
+| `fake_mcp/recorder.py` | Serves canned responses, logs every request |
+| `responses.py` | Builds the canned responses a case serves |
+| `fake_mcp/state.py` | Shapes those responses, offline, before any run |
+| `fake_mcp/server.py` | Tool declarations, shared with the recorder |
+| `graders/cases.py` | The cases, as data |
+| `graders/assertions.py` | Reusable checks over requests and answers |
 | `graders/check_record_fills.py` | Compares the ledger to what the broker filled |
-| `capture_fixtures.py` | Turns real MCP responses into a seed for the fake |
+| `capture_fixtures.py` | Turns real MCP responses into a seed |
+| `check_no_real_data.py` | Scans tracked content against a private list |
 | `fixtures/` | Captured responses. Git-ignored: they hold real positions. |
 
-## Why the fake holds state
+## Why the fake decides nothing
 
-A fake that replays one fixed file cannot test the sequence that matters.
-`place_equity_order` has to mint an order id, and the `get_equity_orders` call
-that follows has to return that order, filled, in the full shape the real API
-uses. Place the order, read it back, record the fill: that is the sequence
-that broke, so the fake has to support it.
+The first version simulated a brokerage, and every defect this harness
+produced came from that. It refused market orders after hours, a rule the
+real broker does not have. A sell added shares and took cash. A dollar-amount
+order sized itself off the quote and filled at the ask, so the notional was
+out by the spread. Each one made a correct agent look wrong, which is the
+most expensive kind of wrong result: it sends someone to debug a healthy
+skill.
 
-Three details are reproduced on purpose, because each one hides a real bug
-when a fake gets it wrong:
+None of those bugs were in the assertions. Of the checks in `assertions.py`,
+almost all read the request rather than any simulated state - was the review
+called before the order, for that symbol; did the draft carry the right
+account. The simulation was carrying very little and breaking often.
+
+So the recorder hands back canned responses and logs every request.
+`state.py` still shapes those responses, but offline and once, which keeps
+the payload details that matter:
 
 - `created_at` carries six fractional digits and `last_transaction_at` carries
   three. Code that parses one and not the other passes against a tidy fixture.
@@ -38,6 +52,14 @@ when a fake gets it wrong:
   number for both, no test can tell a fill price from a quote price.
 - `get_equity_orders` returns newest first. An agent that forwards ids in
   response order records history backwards.
+
+One line is worth keeping sharp. *Deciding an outcome* - whether an order
+fills, at what price, whether there is buying power - is simulation. *Not
+contradicting the request* is not. A review that comes back for WDC when the
+agent asked about NVDA is a lie, and a run that noticed refused to place,
+correctly. So identity fields are echoed and nothing else is, and the echo
+has to be complete: patching the header symbol while leaving the embedded
+quote alone produced a fresh contradiction that a later run also caught.
 
 ## Run the self-tests
 
@@ -127,10 +149,21 @@ scanner is for, and it only works if the list is kept current.
 
 ## What is not built yet
 
-The agent-in-the-loop runs. Each eval needs a subagent with the skill and a
-second one without it, for a baseline. See
-`docs/superpowers/plans/2026-08-03-skill-evaluation-suite.md` for the eval
-cases, the per-skill assertions and the phases.
+The runs exist - `run_case.py` drives a real agent against the recorder. Two
+things from the plan do not:
+
+**A baseline.** Every case runs with the skill. Nothing runs the same prompt
+without it, so no result yet separates "the skill caused this" from "the
+model would have done it anyway".
+
+**Repeat sampling.** Every number so far is one sample, and the variance is
+real: a case flipped between runs, and `over-claimed-is-surfaced` passed
+twice by matching a phrase in unrelated prose before anyone noticed it had
+never built its own condition. The plan asks for three samples per case and
+the evidence supports it.
+
+Until both exist, treat a pass rate as a description of one run rather than a
+measurement of a skill.
 
 ## What a run costs
 
