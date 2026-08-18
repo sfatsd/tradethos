@@ -11,6 +11,7 @@ never breaks mid-write.
 
 import argparse
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -26,7 +27,31 @@ from basket_store import replay, slugify, snapshot_dict
 from basket_weights import (FILL_MODES, WeightError, allocate_cents,
                             normalize_weights, refill)
 
-DEFAULT_DATA_DIR = Path.home() / ".tradethos"
+DATA_DIR_ENV = "TRADETHOS_DATA_DIR"
+
+
+def default_data_dir():
+    """Return the store to use when no --data-dir is given.
+
+    `TRADETHOS_DATA_DIR` exists for a test harness, not for normal use, and
+    the difference matters. The skill tells the agent never to pass
+    `--data-dir`, so an evaluation cannot redirect the store by instructing
+    the agent to point somewhere else: that would change the very command
+    the eval is trying to measure, and it would rely on the agent obeying an
+    instruction while the eval is busy testing whether it obeys
+    instructions.
+
+    An environment variable moves the store out from under the agent
+    instead. The command it runs is the one the skill documents, and the
+    writes land somewhere disposable.
+
+    Read at call time rather than at import, so a test can set it after this
+    module is loaded.
+    """
+    override = os.environ.get(DATA_DIR_ENV)
+    if override:
+        return Path(override)
+    return Path.home() / ".tradethos"
 
 EXIT_OK = 0
 EXIT_VALIDATION = 1
@@ -1377,7 +1402,7 @@ def main(argv=None):
         return EXIT_VALIDATION
 
     raw_data_dir = getattr(args, "data_dir", None)
-    data_dir = Path(raw_data_dir) if raw_data_dir else DEFAULT_DATA_DIR
+    data_dir = Path(raw_data_dir) if raw_data_dir else default_data_dir()
     store = Store(data_dir)
 
     try:

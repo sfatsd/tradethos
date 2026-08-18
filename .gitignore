@@ -2,6 +2,18 @@
 data/baskets/*.json
 !data/baskets/.gitkeep
 
+# Captured MCP fixtures. capture_fixtures.py masks account numbers, but a
+# capture also carries real share counts and real cash, which are the user's
+# own financial position. The fake broker ships synthetic defaults instead,
+# so a capture stays on the machine that made it.
+evals/fixtures/*
+!evals/fixtures/.gitkeep
+
+# The list of values that must never reach a tracked file. It is ignored for
+# the obvious reason: a repository cannot carry the list of things it must
+# not contain. See evals/check_no_real_data.py.
+.private-values
+
 # Python cache
 __pycache__/
 *.pyc

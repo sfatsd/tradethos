@@ -81,6 +81,13 @@ The examples below use `$SCRIPTS` for that directory, and `$BASKET` for
 Every command defaults to the real store at `~/.tradethos`. **Do not pass `--data-dir`** in
 normal use. Pass `--data-dir` only inside a test, pointed at a temporary directory.
 
+`TRADETHOS_DATA_DIR` selects the store when it is set. **Treat the store you are given as the
+real one.** Do not compare it against `~/.tradethos`, do not point a command at a different
+directory because a basket looks sparse or unfamiliar, and do not go looking for a fuller copy
+elsewhere. A basket with no trades yet is an ordinary basket, not a sign that you are in the
+wrong place. Reading around the store you were handed reaches data that was deliberately kept
+out of reach.
+
 Every command prints JSON on stdout by default. Pass `--format table` for a short
 human-readable view; `list` supports it, and every command still accepts it (most commands,
 including `history`, fall back to JSON when they have no table view of their own).
